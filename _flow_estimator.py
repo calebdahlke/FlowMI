@@ -18,6 +18,10 @@ from bmi.utils import ProductSpace
 from bmi.estimators.neural._basic_training import get_batch
 from functools import partial
 
+from flowjax.distributions import Normal, Transformed
+from flowjax.flows import masked_autoregressive_flow
+from flowjax.bijections import RationalQuadraticSpline
+
 import matplotlib.pyplot as plt
 
 ########################### Templates ##################################
@@ -234,78 +238,6 @@ class AffineCoupling(eqx.Module):
         outputs = x * jnp.exp(-s) - t
         return outputs, log_det
 
-################################################################################    
-#################################### Not Used Implementation ###################
-class MaskedCouplingLayer(Bijection):
-
-    r"""Masked coupling layer.
-
-    f(x) = (1-m)*b(x;c(m*x;z)) + m*x
-    where b is the inner bijector, m is the mask, and c is the conditioner.
-
-    Args:
-        bijector (Bijection): inner bijector in the masked coupling layer.
-        mask (Array): Mask. 0 for the input variables that are transformed, 1 for the input variables that are not transformed.
-
-    """
-
-    _mask: Array
-    bijector: Bijection
-
-    @property
-    def mask(self):
-        return jax.lax.stop_gradient(self._mask)
-
-    def __init__(self, bijector: Bijection, mask: Array):
-        self.bijector = bijector
-        self._mask = mask
-
-    def forward(self, x: Array) -> Tuple[Array, Array]:
-        y, log_det = self.bijector(x, x*self.mask)
-        y = (1-self.mask)*y + self.mask*x
-        log_det = ((1-self.mask)*log_det).sum()
-        return y, log_det
-
-    def inverse(self, x: Array) -> Tuple[Array, Array]:
-        y, log_det = self.bijector.inverse(x, x*self.mask)
-        y = (1-self.mask)*y + self.mask*x
-        log_det = ((1-self.mask)*log_det).sum()
-        return y, log_det
-
-class MLPAffine(Bijection):
-    scale_MLP: MLP
-    shift_MLP: MLP
-    dt: float = 1
-
-    def __init__(self, scale_MLP: MLP, shift_MLP: MLP, dt: float = 1):
-        self.scale_MLP = scale_MLP
-        self.shift_MLP = shift_MLP
-        self.dt = dt
-
-    def __call__(self, x: Array, condition_x: Array) -> Tuple[Array, Array]:
-        return self.forward(x, condition_x)
-
-    def forward(self, x: Array, condition_x: Array) -> Tuple[Array, Array]:
-        # Note that this note output log_det as an array instead of a number.
-        # This is because we need to sum over the log_det in the masked coupling layer.
-        scale = jnp.tanh(self.scale_MLP(condition_x)) * self.dt
-        shift = self.shift_MLP(condition_x) * self.dt
-        log_det = scale
-        y = (x + shift) * jnp.exp(scale)
-        return y, log_det
-
-    def inverse(self, x: Array, condition_x: Array) -> Tuple[Array, Array]:
-        scale = jnp.tanh(self.scale_MLP(condition_x)) * self.dt
-        shift = self.shift_MLP(condition_x) * self.dt
-        log_det = -scale
-        y = x  * jnp.exp(-scale) - shift
-        return y, log_det
-
-################################################################################
-################################################################################    
-
-
-
 ############################## MM Flow Structures ##############################
 class RealNVP(NFModel):
     """
@@ -322,8 +254,8 @@ class RealNVP(NFModel):
         data_mean: (ndarray) Mean of Gaussian base distribution
         data_cov: (ndarray) Covariance of Gaussian base distribution
     """
-    affine_coupling_f: List[AffineCoupling]#List[MaskedCouplingLayer]#
-    affine_coupling_g: List[AffineCoupling]#List[MaskedCouplingLayer]#
+    affine_coupling_f: List[AffineCoupling]
+    affine_coupling_g: List[AffineCoupling]
     _n_features_x: int
     _n_features_y: int
 
@@ -343,38 +275,6 @@ class RealNVP(NFModel):
                 n_hidden: int,
                 key: jax.random.PRNGKey,
                 **kwargs):
-
-        # self._n_features_x = n_features_x
-        # affine_coupling_f = []
-        # for i in range(n_layer):
-        #     key, scale_subkey, shift_subkey = jax.random.split(key, 3)
-        #     mask = np.ones(n_features_x)
-        #     mask[int(n_features_x / 2):] = 0
-        #     if i % 2 == 0:
-        #         mask = 1 - mask
-        #     mask = jnp.array(mask)
-        #     scale_MLP = MLP([n_features_x, n_hidden, n_features_x], key=scale_subkey)
-        #     shift_MLP = MLP([n_features_x, n_hidden, n_features_x], key=shift_subkey)
-        #     affine_coupling_f.append(
-        #         MaskedCouplingLayer(MLPAffine(scale_MLP, shift_MLP), mask)
-        #     )
-        # self.affine_coupling_f = affine_coupling_f
-        
-        # self._n_features_y = n_features_y
-        # affine_coupling_g = []
-        # for i in range(n_layer):
-        #     key, scale_subkey, shift_subkey = jax.random.split(key, 3)
-        #     mask = np.ones(n_features_y)
-        #     mask[int(n_features_y / 2):] = 0
-        #     if i % 2 == 0:
-        #         mask = 1 - mask
-        #     mask = jnp.array(mask)
-        #     scale_MLP = MLP([n_features_y, n_hidden, n_features_y], key=scale_subkey)
-        #     shift_MLP = MLP([n_features_y, n_hidden, n_features_y], key=shift_subkey)
-        #     affine_coupling_g.append(
-        #         MaskedCouplingLayer(MLPAffine(scale_MLP, shift_MLP), mask)
-        #     )
-        # self.affine_coupling_g = affine_coupling_g
         
         self._n_features_x = n_features_x
         affine_coupling_f = []
@@ -423,8 +323,7 @@ class RealNVP(NFModel):
             y, log_det_dgi = self.affine_coupling_g[i].inverse(y)
             log_det_dg += log_det_dgi
         return x, log_det_df, y, log_det_dg
-    
-from flowMC.nfmodel.rqSpline import MaskedCouplingRQSpline
+
 class MaskedSplineFlows(NFModel):
     """
     RealNVP mode defined in the paper https://arxiv.org/abs/1605.08803.
@@ -440,8 +339,8 @@ class MaskedSplineFlows(NFModel):
         data_mean: (ndarray) Mean of Gaussian base distribution
         data_cov: (ndarray) Covariance of Gaussian base distribution
     """
-    affine_coupling_f: MaskedCouplingRQSpline#List[MaskedCouplingLayer]#
-    affine_coupling_g: MaskedCouplingRQSpline#List[MaskedCouplingLayer]#
+    affine_coupling_f: Transformed#List[MaskedCouplingLayer]#
+    affine_coupling_g: Transformed#List[MaskedCouplingLayer]#
     _n_features_x: int
     _n_features_y: int
 
@@ -452,6 +351,22 @@ class MaskedSplineFlows(NFModel):
     @property
     def n_features_y(self):
         return self._n_features_y
+    
+    # @property
+    # def meanx(self):
+    #     return jax.lax.stop_gradient(self.affine_coupling_f.base_dist.loc)
+    
+    # @property
+    # def meany(self):
+    #     return jax.lax.stop_gradient(self.affine_coupling_g.base_dist.loc)
+    
+    # @property
+    # def scalex(self):
+    #     return jax.lax.stop_gradient(self.affine_coupling_f.base_dist.scale)
+    
+    # @property
+    # def scaley(self):
+    #     return jax.lax.stop_gradient(self.affine_coupling_g.base_dist.scale)
 
 
     def __init__(self,
@@ -464,49 +379,59 @@ class MaskedSplineFlows(NFModel):
         f_subkey, g_subkey = jax.random.split(key, 2)
         
         # Args:
-        # n_features (int):  Number of features in the data.
-        # num_layers (int): Number of layers in the conditioner.
-        # hidden_size (Sequence[int]): Hidden size of the conditioner.
-        # num_bins (int): Number of bins in the spline.
-        # key (jax.random.PRNGKey): Random key for initialization.
-        # spline_range (Sequence[float]): Range of the spline. Defaults to (-10.0, 10.0).
+        # key: Array,
+        # *,
+        # base_dist: AbstractDistribution,
+        # transformer: AbstractBijection | None = None,
+        # cond_dim: int | None = None,
+        # flow_layers: int = 8,
+        # nn_width: int = 50,
+        # nn_depth: int = 1,
+        # nn_activation: Callable = jnn.relu,
+        # invert: bool = True,
         
         
         self._n_features_x = n_features_x
-        self.affine_coupling_f = MaskedCouplingRQSpline(n_features_x, 
-                                                        6, #6
-                                                        [64, 64], #[64,64]
-                                                        32, #32
-                                                        f_subkey,
-                                                        spline_range=[-5,5])#[-5,5]
+        self.affine_coupling_f = masked_autoregressive_flow(f_subkey,
+                                                            base_dist=Normal(jnp.zeros(n_features_x)),
+                                                            transformer=RationalQuadraticSpline(knots=8, 
+                                                                                                interval=4),
+                                                            flow_layers=8,
+                                                            # nn_width= 10,
+                                                            # nn_depth=1,
+                                                            invert = False,
+                                                            )
         
-        self._n_features_y = n_features_y
-        self.affine_coupling_g = MaskedCouplingRQSpline(n_features_y, 
-                                                        6, 
-                                                        [64, 64], 
-                                                        32, 
-                                                        g_subkey,
-                                                        spline_range=[-5,5])
+        self._n_features_y = n_features_y 
+        self.affine_coupling_g = masked_autoregressive_flow(g_subkey,
+                                                            base_dist=Normal(jnp.zeros(n_features_y)),
+                                                            transformer=RationalQuadraticSpline(knots=8, 
+                                                                                                interval=4),
+                                                            flow_layers=8,
+                                                            # nn_width= 50,
+                                                            # nn_depth=1,
+                                                            invert = False,
+                                                            )
         
     def __call__(self, x: Array, y: Array) -> Tuple[Array, Array, Array, Array]:
         return self.forward(x,y)
 
     def forward(self, x: Array, y: Array) -> Tuple[Array, Array, Array, Array]:
-        x, log_det_df = self.affine_coupling_f.forward(x)
+        x, log_det_df = self.affine_coupling_f.bijection.transform_and_log_det(x)
            
-        y, log_det_dg = self.affine_coupling_g.forward(y)     
+        y, log_det_dg = self.affine_coupling_g.bijection.transform_and_log_det(y)     
         return x, log_det_df, y, log_det_dg
     
     def inverse(self, x: Array, y: Array) -> Tuple[Array, Array, Array, Array]:
-        """ From latent space to data space"""
-        x, log_det_df = self.affine_coupling_f.inverse(x.reshape(1,-1))
+        x, log_det_df = self.affine_coupling_f.bijection.inverse_and_log_det(x)
             
-        y, log_det_dg = self.affine_coupling_g.inverse(y.reshape(1,-1))    
+        y, log_det_dg = self.affine_coupling_g.bijection.inverse_and_log_det(y) 
         return x, log_det_df, y, log_det_dg
 
-@eqx.filter_jit#@jax.jit
+
+@eqx.filter_jit#@jax.jit#
 def _MMFlows_value(
-    flows: MaskedSplineFlows,#RealNVP,
+    flows: MaskedSplineFlows,#RealNVP,#
     xs: jnp.ndarray,
     ys: jnp.ndarray):
     n_sample, dim_x = xs.shape
@@ -522,9 +447,6 @@ def _MMFlows_value(
     hXY = 0.5 * jnp.linalg.slogdet(Sigma)[1] + (dim_x+dim_y) / 2 * (1 + jnp.log(2 * jnp.pi)) - (1 / n_sample) * jnp.sum(logDetJfX)#- (1 / n_sample) * jnp.sum(logDetJgY)
     hY = 0.5 * jnp.linalg.slogdet(Sigma[dim_x:, dim_x:])[1] + dim_y / 2 * (1 + jnp.log(2 * jnp.pi))# - (1 / n_sample) * jnp.sum(logDetJgY)
     hX_Y = hXY-hY
-    
-    # CondSigma = Sigma[:dim_x, :dim_x] - jnp.matmul(Sigma[:dim_x, dim_x:], jnp.matmul(jnp.linalg.inv(Sigma[dim_x:, dim_x:]), Sigma[dim_x:, :dim_x]))
-    # hX_Y = 0.5 * jnp.linalg.slogdet(CondSigma)[1] + dim_x / 2 * (1 + jnp.log(2 * jnp.pi)) - (1 / n_sample) * jnp.sum(logDetJfX)#logDetJfX.shape[0]
     
     value = hX - hX_Y
     return value
@@ -546,15 +468,13 @@ def loss_function(flows, xs, ys):
     hX_Y = hXY-hY
     hY_X = hXY-hX
     
-    # CondSigma = Sigma[:dim_x, :dim_x] - jnp.matmul(Sigma[:dim_x, dim_x:], jnp.matmul(jnp.linalg.inv(Sigma[dim_x:, dim_x:]), Sigma[dim_x:, :dim_x]))
-    # hX_Y = 0.5 * jnp.linalg.slogdet(CondSigma)[1] + dim_x / 2 * (1 + jnp.log(2 * jnp.pi)) - (1 / n_sample) * jnp.sum(logDetJfX) #logDetJfX.shape[0]
     
     loss = hX + hX_Y + hY_X + hY#
     return loss+jax.lax.stop_gradient(hX-hX_Y-loss)
 
 
 def _MMFlow_value_neg_grad(
-    flows: MaskedSplineFlows,#RealNVP,
+    flows: MaskedSplineFlows,#RealNVP,#
     xs: jnp.ndarray,
     ys: jnp.ndarray):
     # Define functions to compute gradients using JAX's autograd
@@ -564,7 +484,7 @@ def _MMFlow_value_neg_grad(
 
 def MMFlow_training(
     rng: jax.random.PRNGKeyArray,
-    flows: eqx.Module,
+    flows: NFModel,#eqx.Module,
     xs: BatchedPoints,
     ys: BatchedPoints,
     xs_test: Optional[BatchedPoints] = None,
@@ -605,8 +525,8 @@ def MMFlow_training(
     optimizer = optax.adam(learning_rate=learning_rate)
     opt_state = optimizer.init(eqx.filter(flows, eqx.is_array))
 
-    # compile the training step
-    @eqx.filter_jit#@jax.jit
+    # compile the training step   flows.affine_coupling_g.base_dist.scale
+    @eqx.filter_jit#@jax.jit#
     def step(
         *,
         flows,
@@ -658,7 +578,7 @@ def MMFlow_training(
             break
 
     training_log.finish()
-    plot_final(flows, batch_xs,batch_ys)
+    plot_final(flows, xs, ys)
     return training_log, flows
 
 
@@ -720,7 +640,7 @@ class MMFLowEstimator(IMutualInformationPointEstimator):
     def parameters(self) -> MMFLowParams:
         return self._params
 
-    def _create_flows(self, dim_x: int, dim_y: int, key: jax.random.PRNGKeyArray) -> MaskedSplineFlows:#RealNVP:
+    def _create_flows(self, dim_x: int, dim_y: int, key: jax.random.PRNGKeyArray) -> MaskedSplineFlows:#RealNVP:#
         return MaskedSplineFlows(n_features_x = dim_x, n_features_y = dim_y, n_layer = self._params.num_blocks, n_hidden = self._params.hidden_features, key=key)
         # return RealNVP(n_features_x = dim_x, n_features_y = dim_y, n_layer = self._params.num_blocks, n_hidden = self._params.hidden_features, key=key)
     
@@ -757,7 +677,7 @@ class MMFLowEstimator(IMutualInformationPointEstimator):
         self._trained_flows = trained_flows
 
         return EstimateResult(
-            mi_estimate=training_log.final_mi,#np.array(training_log.additional_information['test_history'])[-1,1]
+            mi_estimate=training_log.final_mi,
             additional_information=training_log.additional_information)
 
     def estimate(self, x: ArrayLike, y: ArrayLike) -> float:
@@ -842,7 +762,7 @@ def plot_final(
         # # Show the plot
         # plt.show()
         # fX[:,0][:,0], fX[:,0]  #fX[:,0][:,1], fX[:,1]
-        plt.scatter(fX[:,0][:,0], fX[:,0][:,1], s=10, c='black', alpha=0.5)
+        plt.scatter(fX[:,0], fX[:,1], s=10, c='black', alpha=0.5)
         # Add labels and title
         plt.xlabel('X0-axis label')
         plt.ylabel('X1-axis label')
@@ -851,7 +771,7 @@ def plot_final(
         # Show the plot
         plt.show()
         #fX[:,0][:,0], fX[:,0] 
-        plt.scatter(fX[:,0][:,0], gY[:,0], s=10, c='black', alpha=0.5)
+        plt.scatter(fX[:,0], gY[:,0], s=10, c='black', alpha=0.5)
         # Add labels and title
         plt.xlabel('X0-axis label')
         plt.ylabel('Y0-axis label')
@@ -860,7 +780,7 @@ def plot_final(
         # Show the plot
         plt.show()
         #fX[:,0][:,1], fX[:,1]
-        plt.scatter(fX[:,0][:,1], gY[:,1], s=10, c='black', alpha=0.5)
+        plt.scatter(fX[:,1], gY[:,1], s=10, c='black', alpha=0.5)
         # Add labels and title
         plt.xlabel('X1-axis label')
         plt.ylabel('Y1-axis label')

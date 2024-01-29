@@ -9,6 +9,7 @@ import pyro
 import pyro.distributions as dist
 from tqdm import trange
 import mlflow
+import copy
 
 from neural.baselines import BatchDesignBaseline, DesignBaseline
 
@@ -301,7 +302,7 @@ class SplineFlow(LazyNN):##DesignBaseline ##nn.Module
         self.countbins = count_bins
         self.bounds = bounds
         
-        if dim_input == 1:
+        if dim_input == 0:
             self.spline_transform = T.Spline(dim_input, count_bins=count_bins, bound=bounds)
         else:     # spline_coupling
             # spl1 = spline_autoregressive1(dim_input,hidden_dims=[dim_input * 4+1, dim_input * 4+1], count_bins=count_bins, bound=bounds, order='linear')
@@ -309,9 +310,7 @@ class SplineFlow(LazyNN):##DesignBaseline ##nn.Module
             # spl2 =spline_autoregressive1(dim_input,hidden_dims=[dim_input * 4+1, dim_input * 4+1], count_bins=count_bins, bound=bounds, order='linear')
             # # per2 = T.Permute(torch.arange(dim_input, dtype=torch.long).flip(0)),per2
             # self.spline_transform = T.ComposeTransform([spl1,per1,spl2],cache_size=0)
-            self.spline_transform = spline_autoregressive1(dim_input,hidden_dims=[64, 32], count_bins=count_bins, bound=bounds, order='quadratic')
-        #y, lofdet = spline_transform.spline_op(-2*torch.ones(2))
-        #z = spline_transform.inv(y)
+            self.spline_transform = spline_autoregressive1(dim_input,n_flows=2,hidden_dims=[32, 32], count_bins=count_bins, bound=bounds, order='quadratic')
 
     def forward(self, x):
         z = self.spline_transform(x)
@@ -320,11 +319,11 @@ class SplineFlow(LazyNN):##DesignBaseline ##nn.Module
 
     def reverse(self, z):
         x = self.spline_transform.inv(z)
-        # logDet = self.spline_transform._cache_log_detJ
-        return x
+        # logDet = self.spline_transform.log_abs_det_jacobian(z, x)
+        return x#, logDet
 
 from pyro.nn import AutoRegressiveNN
-def spline_autoregressive1(input_dim, hidden_dims=None, count_bins=8, bound=3.0, order='linear'):
+def spline_autoregressive1(input_dim, n_flows = 8, hidden_dims=None, count_bins=8, bound=3.0, order='linear'):
     r"""
     A helper function to create an
     :class:`~pyro.distributions.transforms.SplineAutoregressive` object that takes
@@ -353,8 +352,19 @@ def spline_autoregressive1(input_dim, hidden_dims=None, count_bins=8, bound=3.0,
         param_dims = [count_bins, count_bins, count_bins - 1]
     else:
         param_dims = [count_bins, count_bins, count_bins - 1, count_bins]
-    arn = AutoRegressiveNN(input_dim, hidden_dims, param_dims=param_dims)
-    return T.SplineAutoregressive(input_dim, arn, count_bins=count_bins, bound=bound, order=order)
+        
+    arns = nn.ModuleList([AutoRegressiveNN(input_dim,
+            hidden_dims,
+            param_dims=param_dims) for _ in range(n_flows)])
+    
+    nfs = [T.SplineAutoregressive(input_dim, arns[0], count_bins=count_bins, bound=bound, order=order)]
+    for i in range(n_flows-1):
+        nfs.append(T.Permute(torch.arange(input_dim, dtype=torch.long).flip(0)))#T.Permute(torch.randperm(input_dim, dtype=torch.long)))#T.permute(dim_input)#
+        nfs.append(T.SplineAutoregressive(input_dim, arns[i], count_bins=count_bins, bound=bound, order=order))
+
+    return T.ComposeTransform(nfs,cache_size=0)
+    # arn = AutoRegressiveNN(input_dim, hidden_dims, param_dims=param_dims)
+    # return T.SplineAutoregressive(input_dim, arn, count_bins=count_bins, bound=bound, order=order)
 
 ##############################################################################################
 ##############################################################################################
@@ -494,19 +504,10 @@ class MomentMatchMarginalPosterior(VariationalMutualInformationOptimizer):
         self.gY = flow_y
         self.pi_const = 2*torch.acos(torch.zeros(1)).to(device)
         self.e_const = torch.exp(torch.tensor([1])).to(device)
-        # self.I = torch.eye()
-        # if hidden == None:
-        #     self.fX = IdentityTransform()
-        #     self.gY = IdentityTransform()
-        # else:
-        #     self.fX = RealNVP(dim_x, num_blocks=2, dim_hidden=hidden//2)
-        #     self.gY = RealNVP(dim_y, num_blocks=2, dim_hidden=hidden//2)
 
     def differentiable_loss(self, *args, **kwargs):
         # sample from design
         latents, *history = self._get_data(args, kwargs)
-        # theta, xi_designs, y_outcomes = self.model
-        
         
         dim_lat = latents.shape[1]#latents.flatten(-2).shape[1]#
         dim_obs = history[0][1].shape[1]
@@ -529,12 +530,13 @@ class MomentMatchMarginalPosterior(VariationalMutualInformationOptimizer):
         hY = .5*torch.log(torch.linalg.det(Sigma[dim_lat:,dim_lat:]))+(dim_obs/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY)
         hXY = .5*torch.log(torch.linalg.det(Sigma))+((dim_lat+dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)-torch.mean(logDetJgY)
         self.hX_Y = hXY-hY
+        hY_X = hXY-self.hX
         
         # save optimal parameters for decision
         self.mu = torch.mean(data,axis=0)
         self.Sigma = Sigma
         # print(self.hX+self.hX_Y)
-        return (self.hX+self.hX_Y)
+        return self.hX+self.hX_Y-torch.detach(2*self.hX_Y)#+hY_X+hY
 
     def loss(self, *args, **kwargs):
         """
@@ -571,43 +573,38 @@ def optimise_design(
     design_net = BatchDesignBaseline(
         T=1, design_dim=(1, p), design_init=design_init
     ).to(device)
-    # new_mean = posterior_loc.reshape(num_sources, p)
-    # new_covmat = torch.cat(
-    #     [
-    #         posterior_cov[:p,:p].unsqueeze(0),posterior_cov[p:,p:].unsqueeze(0)
-    #     ]
-    # )
-    new_mean = posterior_loc
-    new_covmat = posterior_cov
+
+
     ho_model = HiddenObjects2(
         design_net=design_net,
-        # Normal family -- new prior is stil MVN but with different params
-        theta_loc=new_mean,
-        theta_covmat=new_covmat,
+        theta_loc=posterior_loc,
+        theta_covmat=posterior_cov,
         flow_theta = flow_theta,
         T=1,
         p=p,
         K=num_sources,
         noise_scale=noise_scale * torch.ones(1, device=device),
     )
-    hidden = 128#None#
+    
+    hidden = 64#None#
     if hidden == None:
         fX = IdentityTransform()
         gY = IdentityTransform()
     else:
         dim_x = num_sources*p
         dim_y = 1
-        fX = SplineFlow(dim_x, count_bins=32, bounds=4, device=device).to(device)
-        gY = SplineFlow(dim_y, count_bins=32, bounds=4, device=device).to(device)
-        # fX = RealNVP(dim_x, num_blocks=3, dim_hidden=hidden//2,device=device).to(device)
-        # gY = RealNVP(dim_y, num_blocks=3, dim_hidden=hidden//2,device=device).to(device)
-    
+        if flow_theta == None:
+            fX = SplineFlow(dim_x, count_bins=8, bounds=5, device=device).to(device)
+            # fX = RealNVP(dim_x, num_blocks=3, dim_hidden=hidden//2,device=device).to(device)
+        else:
+            fX = copy.deepcopy(flow_theta)
+        if flow_obs == None:
+            gY = SplineFlow(dim_y, count_bins=8, bounds=5, device=device).to(device)
+            # gY = RealNVP(dim_y, num_blocks=3, dim_hidden=hidden//2,device=device).to(device)
+        else:
+            gY = copy.deepcopy(flow_obs)
+
     ### Set-up loss ###
-    # mi_loss_instance = MomentMatchMarginalPosterior(
-    #     model=ho_model.model,
-    #     batch_size=batch_size,
-    #     # prior_entropy=ho_model.theta_prior.entropy(),
-    # )
     mi_loss_instance = MomentMatchMarginalPosterior(
         model=ho_model.model,
         batch_size=batch_size,
@@ -670,8 +667,8 @@ def main_loop(
     # theta_covmat = torch.eye(p, device=device)
     theta_loc = torch.zeros((1, num_sources*p), device=device)
     theta_covmat = torch.eye(num_sources*p, device=device)
-    flow_theta = IdentityTransform()
-    flow_obs = IdentityTransform()
+    flow_theta = None#IdentityTransform()
+    flow_obs = None#IdentityTransform()
     prior = torch.distributions.MultivariateNormal(theta_loc, theta_covmat)
 
     # sample true param
@@ -711,7 +708,7 @@ def main_loop(
                 trans_true_theta,_ = flow_theta.forward(true_theta[0])
             else:
                 trans_true_theta = true_theta
-            design, observation = ho_model.forward(theta=trans_true_theta)#true_theta
+            design, observation = ho_model.forward(theta=trans_true_theta)
             mux = mi_loss_instance.mu[:p * num_sources].detach()
             muy = mi_loss_instance.mu[p * num_sources:].detach()
             Sigmaxx = mi_loss_instance.Sigma[:p * num_sources,:p * num_sources].detach()
@@ -720,11 +717,9 @@ def main_loop(
             obs, _ = mi_loss_instance.gY.forward(observation[0])
             # obs = observation[0]
             posterior_loc = (mux + torch.matmul(Sigmaxy,torch.linalg.solve(Sigmayy,(obs-muy))).flatten())
-            print(true_theta)#flow_theta.reverse
+            print(true_theta)
             print(posterior_loc)
             print(mi_loss_instance.fX.reverse(posterior_loc))
-            test2, hold = mi_loss_instance.fX.forward(posterior_loc.reshape(1,4))
-            print(test2)
             posterior_cov = Sigmaxx-torch.matmul(Sigmaxy,torch.linalg.solve(Sigmayy,Sigmaxy.T))
             flow_theta = mi_loss_instance.fX
             flow_obs = mi_loss_instance.gY
@@ -831,7 +826,7 @@ if __name__ == "__main__":
         "--mlflow-experiment-name", default="locfin_mm_variational", type=str
     )
     parser.add_argument("--lr", default=0.005, type=float)#0.005
-    parser.add_argument("--num-steps", default=2000, type=int)#5000
+    parser.add_argument("--num-steps", default=5000, type=int)#5000
     
     args = parser.parse_args()
 

@@ -12,30 +12,6 @@ import bmi.estimators.external.julia_estimators as julia_estimators
 
 import bmi.benchmark.tasks.multinormal as multinormal
 
-##### outside estimators
-# ksg = r_estimators.RKSGEstimator(variant=1, neighbors=10)
-# julia_estimators.JuliaTransferEstimator(bins=30)
-
-
-
-# TRANS_MULTINORMAL_BASE_2x2 = multinormal.task_multinormal_2pair(2,2)#2,2
-
-### Works
-# task = bmi.benchmark.tasks.transform_wiggly_task(TRANS_MULTINORMAL_BASE_2x2)
-# task = bmi.benchmark.tasks.transform_normal_cdf_task(TRANS_MULTINORMAL_BASE_2x2)
-# task = bmi.benchmark.tasks.transform_half_cube_task(TRANS_MULTINORMAL_BASE_2x2)
-# task = bmi.benchmark.tasks.transform_wiggly_task(bmi.benchmark.tasks.transform_normal_cdf_task(TRANS_MULTINORMAL_BASE_2x2))
-# task = bmi.benchmark.tasks.transform_half_cube_task(bmi.benchmark.tasks.transform_normal_cdf_task(TRANS_MULTINORMAL_BASE_2x2))
-
-### Need to define for self
-# bmi.benchmark.tasks.task_bimodal_gaussians(TRANS_MULTINORMAL_BASE_2x2)
-
-### Needs other dim
-# bmi.benchmark.tasks.transform_spiral_task(TRANS_MULTINORMAL_BASE_2x2)
-# bmi.benchmark.tasks.transform_rotate_task(TRANS_MULTINORMAL_BASE_2x2)
-# bmi.benchmark.tasks.task_additive_noise(TRANS_MULTINORMAL_BASE_2x2)
-# bmi.benchmark.tasks.transform_swissroll_task(TRANS_MULTINORMAL_BASE_2x2, task_name="Swiss roll 2 × 2")
-
 TASKS = ['1v1-normal-0.75',                             #0
 'normal_cdf-1v1-normal-0.75',                           #1
 '1v1-additive-0.1',                                     #2
@@ -93,8 +69,10 @@ ksg_value = np.zeros((n_tasks, n_runs))
 MMFlow_value = np.zeros((n_tasks, n_runs))
 mine_value = np.zeros((n_tasks, n_runs))
 InfoNCE_value = np.zeros((n_tasks, n_runs))
+NWJ_value = np.zeros((n_tasks, n_runs))
+DV_value = np.zeros((n_tasks, n_runs))
 
-method_names = ['True', 'GaussMM', 'CCA', 'KSG', 'MMFlow', 'MINE', 'InfoNCE']
+method_names = ['True',  'CCA', 'KSG','GaussMM', 'MMFlow', 'MINE', 'InfoNCE', 'NWJ', 'DV']
 
 task_names = []
 
@@ -115,15 +93,10 @@ for j in range(n_tasks):
         
         X, Y = task.sample(n_samples, seed=i)#1000,42
         
-        # X, _ = datasets.make_moons(n_samples=10000, shuffle=True, noise=.05, random_state=42)
-        # Y = np.random.multivariate_normal(np.zeros(2),np.eye(2),10000 )
-        
         XY = np.concatenate((X, Y), axis=1)
         Sigma = np.cov(XY.T)
-        # CondSigma = Sigma[:dim_x, :dim_x] - jnp.matmul(Sigma[:dim_x, dim_x:], jnp.matmul(jnp.linalg.inv(Sigma[dim_x:, dim_x:]), Sigma[dim_x:, :dim_x]))
         dim_x = X.shape[1]
         hX = 0.5 * np.linalg.slogdet(Sigma[:dim_x, :dim_x])[1] + dim_x / 2 * (1 + np.log(2 * np.pi))
-        # hX_Y = 0.5 * jnp.linalg.slogdet(CondSigma)[1] + dim_x / 2 * (1 + jnp.log(2 * jnp.pi)) - (1 / n_sample) * jnp.sum(logDetJfX)#logDetJfX.shape[0]
         hXY = 0.5 * np.linalg.slogdet(Sigma)[1] + (2*dim_x) / 2 * (1 + np.log(2 * np.pi))
         hY = 0.5 * np.linalg.slogdet(Sigma[dim_x:, dim_x:])[1] + dim_x / 2 * (1 + np.log(2 * np.pi))
         hX_Y = hXY-hY
@@ -131,28 +104,32 @@ for j in range(n_tasks):
         Gauss_value[j,i] = value
         print(f"Gaussian Assumption mutual information: {value}")   
         
-        # cca = bmi.estimators.CCAMutualInformationEstimator()
-        # # cca._training_log = Experiment_Log
-        # cca_value[j,i] = cca.estimate(X, Y)
-        # # print(f"Estimate by CCA: {cca.estimate(X, Y):.2f}")
+        cca = bmi.estimators.CCAMutualInformationEstimator()
+        cca_value[j,i] = cca.estimate(X, Y)
         
-        # ksg = bmi.estimators.KSGEnsembleFirstEstimator()#neighborhoods=(10,)
-        # # ksg._training_log = Experiment_Log
-        # ksg_value[j,i] = ksg.estimate(X, Y)
-        # # print(f"Estimate by KSG: {ksg.estimate(X, Y):.2f}")
+        ksg = bmi.estimators.KSGEnsembleFirstEstimator(neighborhoods=(5,))#10
+        ksg_value[j,i] = ksg.estimate(X, Y)
         
         
         MMFlow = MMFLowEstimator(batch_size = batch_size, max_n_steps=max_n_steps, learning_rate=learning_rate,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)#max_n_steps=int(100*(i+1))
         MMFLowResults = MMFlow.estimate_with_info(X,Y)
         MMFlow_value[j,i] = np.array(MMFLowResults.additional_information['test_history'])[-1,1]#MMFLowResults.mi_estimate
         
-        # mine = bmi.estimators.MINEEstimator(batch_size = batch_size, max_n_steps=max_n_steps, learning_rate=learning_rate,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
-        # mineResults = mine.estimate_with_info(X,Y)
-        # mine_value[j,i] = mineResults.mi_estimate
+        mine = bmi.estimators.MINEEstimator(batch_size = batch_size, max_n_steps=max_n_steps, learning_rate=learning_rate,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
+        mineResults = mine.estimate_with_info(X,Y)
+        mine_value[j,i] = mineResults.mi_estimate
         
-        # InfoNCE = bmi.estimators.InfoNCEEstimator(batch_size = batch_size, max_n_steps=max_n_steps, learning_rate=learning_rate,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
-        # InfoNCEResults = InfoNCE.estimate_with_info(X,Y)
-        # InfoNCE_value[j,i] = InfoNCEResults.mi_estimate
+        InfoNCE = bmi.estimators.InfoNCEEstimator(batch_size = batch_size, max_n_steps=max_n_steps, learning_rate=learning_rate,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
+        InfoNCEResults = InfoNCE.estimate_with_info(X,Y)
+        InfoNCE_value[j,i] = InfoNCEResults.mi_estimate
+        
+        NWJ = bmi.estimators.NWJEstimator(batch_size = batch_size, max_n_steps=max_n_steps, learning_rate=learning_rate,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
+        NWJResults = NWJ.estimate_with_info(X,Y)
+        NWJ_value[j,i] = NWJResults.mi_estimate
+        
+        DV = bmi.estimators.DonskerVaradhanEstimator(batch_size = batch_size, max_n_steps=max_n_steps, learning_rate=learning_rate,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
+        DVResults = DV.estimate_with_info(X,Y)
+        DV_value[j,i] = DVResults.mi_estimate
         
     if np.shape(X)[1] == 1:
         plt.scatter(X, Y, s=10, c='blue', alpha=0.5)  # You can customize the color, size, and transparency (alpha) as needed
@@ -211,8 +188,8 @@ for j in range(n_tasks):
     plt.plot(np.array(MMFLowResults.additional_information['training_history'])[:,0],np.array(MMFLowResults.additional_information['training_history'])[:,1],label='MMFlow Train', color='blue', linestyle='dashed', alpha = .5)
     plt.plot(np.array(MMFLowResults.additional_information['test_history'])[:,0],np.array(MMFLowResults.additional_information['test_history'])[:,1],label='MMFlow Test', color='blue')
 
-    # plt.plot(np.array(mineResults.additional_information['training_history'])[:,0],np.array(mineResults.additional_information['training_history'])[:,1],label='MINE Train', color='orange', linestyle='dashed', alpha = .5)
-    # plt.plot(np.array(mineResults.additional_information['test_history'])[:,0],np.array(mineResults.additional_information['test_history'])[:,1],label='MINE Test', color='orange')
+    plt.plot(np.array(mineResults.additional_information['training_history'])[:,0],np.array(mineResults.additional_information['training_history'])[:,1],label='MINE Train', color='orange', linestyle='dashed', alpha = .5)
+    plt.plot(np.array(mineResults.additional_information['test_history'])[:,0],np.array(mineResults.additional_information['test_history'])[:,1],label='MINE Test', color='orange')
 
     # plt.plot(np.array(InfoNCEResults.additional_information['training_history'])[:,0],np.array(InfoNCEResults.additional_information['training_history'])[:,1],label='InfoNCE Train', color='green', linestyle='dashed', alpha = .5)
     # plt.plot(np.array(InfoNCEResults.additional_information['test_history'])[:,0],np.array(InfoNCEResults.additional_information['test_history'])[:,1],label='InfoNCE Test', color='green')

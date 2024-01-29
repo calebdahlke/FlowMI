@@ -328,9 +328,6 @@ def optimise_design(
     design_net = BatchDesignBaseline(T=1, design_dim=(1, 1), design_init=design_init).to(
         device
     )
-    # new_mean = posterior_loc
-    # new_covmat = posterior_cov
-    # posterior_dist = torch.distributions.MultivariateNormal(new_mean, new_covmat)
 
     epidemic = Epidemic2(
         design_net=design_net,
@@ -355,11 +352,11 @@ def optimise_design(
         dim_x = latent_dim
         dim_y = observation_dim ### Try Quadratic and test bin/bound layers try 12
         if flow_theta == None:
-            fX = SplineFlow(dim_x, count_bins=12, bounds=5, device=device).to(device)
+            fX = SplineFlow(dim_x, count_bins=8, bounds=5, device=device).to(device)
         else:
             fX = copy.deepcopy(flow_theta)
         if flow_obs == None:
-            gY = SplineFlow(dim_y, count_bins=12, bounds=5, device=device).to(device)
+            gY = SplineFlow(dim_y, count_bins=8, bounds=5, device=device).to(device)
         else:
             gY = copy.deepcopy(flow_obs)
         # fX = RealNVP(dim_x, num_blocks=3, dim_hidden=hidden//2,device=device).to(device)
@@ -499,8 +496,6 @@ def main_loop(
             print(true_theta)#flow_theta.reverse
             print(posterior_loc)#
             print(mi_loss_instance.fX.reverse(posterior_loc).exp())
-            test2, hold = mi_loss_instance.fX.forward(posterior_loc.reshape(1,2))
-            print(test2)
             posterior_cov = Sigmaxx-torch.matmul(Sigmaxy,torch.linalg.solve(Sigmayy,Sigmaxy.T))
             flow_theta = mi_loss_instance.fX
             flow_obs = mi_loss_instance.gY

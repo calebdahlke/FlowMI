@@ -121,7 +121,7 @@ def eval_from_source(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluation") #mlruns/4/38da5c9d1b484defbd744d38a903678a/artifacts/results_locfin_mm_vi.pickle
-    parser.add_argument("--path-to-artifact", default="mlruns/4/0381ff02906a4cf6aafe5d3f421962c0/artifacts/results_locfin_mm_vi.pickle", type=str)#
+    parser.add_argument("--path-to-artifact", default="mlruns/221177356248652283/2a4c9685d767489f8fc2a680fad232b2/artifacts/results_locfin_mm_vi.pickle", type=str)#
     parser.add_argument("--device", default="cpu", type=str)#"cuda"
     parser.add_argument("--seed", default=-1, type=int)
     parser.add_argument("--num-inner-samples", default=int(5e5), type=int)
