@@ -4,551 +4,41 @@ import argparse
 
 import torch
 from torch import nn
-from pyro.infer.util import torch_item
+# from pyro.infer.util import torch_item
 import pyro
 import pyro.distributions as dist
 from tqdm import trange
 import mlflow
 import copy
-
-from neural.baselines import BatchDesignBaseline, DesignBaseline
+from pyro.nn import AutoRegressiveNN
+from neural.baselines import BatchDesignBaseline#, DesignBaseline
 
 from experiment_tools.pyro_tools import auto_seed
 from oed.design import OED
 
-from location_finding import HiddenObjects
 from pyro import poutine
 from pyro.poutine.util import prune_subsample_sites
 
-import argparse
-import datetime
-import math
-import subprocess
-import pickle
-from functools import lru_cache
-import time
+# import datetime
+# import math
+# import subprocess
+# from functools import lru_cache
+# import time
 
-import torch
-from torch.distributions import constraints
-from torch.distributions import transform_to
+# from torch.distributions import constraints
+# from torch.distributions import transform_to
 
-import pyro
-import pyro.distributions as dist
-import pyro.contrib.gp as gp
-from pyro.contrib.util import rmv
+# import pyro.contrib.gp as gp
+# from pyro.contrib.util import rmv
 
 import pyro.distributions.transforms as T
 
 
-from pyro.util import torch_isnan, torch_isinf
-def is_bad(a):
-    return torch_isnan(a) or torch_isinf(a)
-
-##############################################################################################
-################################# Alternative Hidden Model ###################################
-##############################################################################################
-from oed.primitives import observation_sample, latent_sample, compute_design
-import pandas as pd
-class HiddenObjects2(nn.Module):
-    """Location finding example"""
-
-    def __init__(
-        self,
-        design_net,
-        base_signal=0.1,  # G-map hyperparam
-        max_signal=1e-4,  # G-map hyperparam
-        theta_loc=None,  # prior on theta mean hyperparam
-        theta_covmat=None,  # prior on theta covariance hyperparam
-        flow_theta = None,
-        noise_scale=None,  # this is the scale of the noise term
-        p=1,  # physical dimension
-        K=1,  # number of sources
-        T=2,  # number of experiments
-    ):
-        super().__init__()
-        self.design_net = design_net
-        self.base_signal = base_signal
-        self.max_signal = max_signal
-        # Set prior:
-        self.theta_loc = theta_loc if theta_loc is not None else torch.zeros(K*p)
-        self.theta_covmat = theta_covmat if theta_covmat is not None else torch.eye(K*p)
-        self.flow_theta = flow_theta if flow_theta is not None else IdentityTransform() #reverse
-        self.theta_prior = dist.MultivariateNormal(
-            self.theta_loc, self.theta_covmat
-        )
-        # Observations noise scale:
-        self.noise_scale = noise_scale if noise_scale is not None else torch.tensor(1.0)
-        self.n = 1  # samples per design=1
-        self.p = p  # dimension of theta (location finding example will be 1, 2 or 3).
-        self.K = K  # number of sources
-        self.T = T  # number of experiments
-
-    def forward_map(self, xi, theta):
-        """Defines the forward map for the hidden object example
-        y = G(xi, theta) + Noise.
-        """
-        # two norm squared
-        sq_two_norm = (xi - theta).pow(2).sum(axis=-1)
-        # add a small number before taking inverse (determines max signal)
-        sq_two_norm_inverse = (self.max_signal + sq_two_norm).pow(-1)
-        # sum over the K sources, add base signal and take log.
-        mean_y = torch.log(self.base_signal + sq_two_norm_inverse.sum(-1, keepdim=True))
-        return mean_y
-
-    def model(self):
-        if hasattr(self.design_net, "parameters"):
-            #! this is required for the pyro optimizer
-            pyro.module("design_net", self.design_net)
-
-        ########################################################################
-        # Sample latent variables theta
-        ########################################################################
-        theta = latent_sample("theta", self.theta_prior)
-        with torch.no_grad():
-            theta = self.flow_theta.reverse(theta)#.flatten(-1)
-        theta = theta.reshape((len(theta),self.K,self.p))
-        y_outcomes = []
-        xi_designs = []
-
-        # T-steps experiment
-        for t in range(self.T):
-            ####################################################################
-            # Get a design xi; shape is [batch size x self.n x self.p]
-            ####################################################################
-            xi = compute_design(
-                f"xi{t + 1}", self.design_net.lazy(*zip(xi_designs, y_outcomes))
-            )
-            ####################################################################
-            # Sample y at xi; shape is [batch size x 1]
-            ####################################################################
-            mean = self.forward_map(xi, theta)
-            sd = self.noise_scale
-            y = observation_sample(f"y{t + 1}", dist.Normal(mean, sd).to_event(1))
-
-            ####################################################################
-            # Update history
-            ####################################################################
-            y_outcomes.append(y)
-            xi_designs.append(xi)
-
-        return theta, xi_designs, y_outcomes
-
-    def forward(self, theta):
-        """Run the policy for a given theta"""
-        self.design_net.eval()
-
-        def conditioned_model():
-            with pyro.plate_stack("expand_theta_test", [theta.shape[0]]):
-                # condition on theta
-                return pyro.condition(self.model, data={"theta": theta})()
-
-        with torch.no_grad():
-            theta, designs, observations = conditioned_model()
-        self.design_net.train()
-        return designs, observations
-
-    def eval(self, n_trace=3, theta=None, verbose=True):
-        """run the policy, print output and return it in a dataframe"""
-        self.design_net.eval()
-
-        if theta is None:
-            theta = self.theta_prior.sample(torch.Size([n_trace]))
-            # theta = self.flow_theta.reverse(theta)
-        else:
-            theta = theta.unsqueeze(0).expand(n_trace, *theta.shape)
-            # dims: [n_trace * number of thetas given, shape of theta]
-            theta = theta.reshape(-1, *theta.shape[2:])
-
-        designs, observations = self.forward(theta)
-        output = []
-        true_thetas = []
-
-        for i in range(n_trace):
-            if verbose:
-                print("\nExample run {}".format(i + 1))
-                print(f"*True Theta: {theta[i].cpu()}*")
-            run_xis = []
-            run_ys = []
-            # Print optimal designs, observations for given theta
-            for t in range(self.T):
-                xi = designs[t][i].detach().cpu().reshape(-1)
-                run_xis.append(xi)
-                y = observations[t][i].detach().cpu().item()
-                run_ys.append(y)
-                if verbose:
-                    print(f"xi{t + 1}: {xi},   y{t + 1}: {y}")
-            run_df = pd.DataFrame(torch.stack(run_xis).numpy())
-            run_df.columns = [f"xi_{i}" for i in range(self.p)]
-            run_df["observations"] = run_ys
-            run_df["order"] = list(range(1, self.T + 1))
-            run_df["run_id"] = i + 1
-            output.append(run_df)
-
-        self.design_net.train()
-        return pd.concat(output), theta.cpu().numpy()
-##############################################################################################
-##############################################################################################
-
-##############################################################################################
-######################################### Flows ##############################################
-##############################################################################################
-from neural.modules import LazyDelta
-class LazyNN(nn.Module):
-    def __init__(self, design_dim):
-        super().__init__()
-        self.register_buffer("prototype", torch.zeros(design_dim))
-
-    def lazy(self, x):
-        def delayed_function():
-            return self.forward(x)
-
-        lazy_delta = LazyDelta(
-            delayed_function, self.prototype, event_dim=self.prototype.dim()
-        )
-        return lazy_delta
-
-class RealNVP(LazyNN):##DesignBaseline ##nn.Module
-    def __init__(self, dim_input, num_blocks=5, dim_hidden=256,device = 'cuda'): #cpu
-        super().__init__(dim_input)#, RealNVP, self
-        
-        self.dim_input = dim_input
-        self.num_blocks = num_blocks
-        self.dim_hidden = dim_hidden#dim_input#
-
-        self.scale_net = nn.ModuleList([self._scale_block() for _ in range(num_blocks)])
-        self.translation_net = nn.ModuleList([self._translation_block() for _ in range(num_blocks)])
-        mask = torch.ones(dim_input).to(device)
-        mask[int(dim_input / 2):] = 0
-        mask.requires_grad = False
-        self.mask = mask
-
-    def _scale_block(self):
-        return nn.Sequential(
-            nn.Linear(self.dim_input, self.dim_hidden),#
-            nn.ReLU(),
-            nn.Linear(self.dim_hidden, self.dim_hidden),
-            nn.ReLU(),
-            nn.Linear(self.dim_hidden, self.dim_input),#
-            nn.Tanh()
-        )
-
-    def _translation_block(self):
-        return nn.Sequential(
-            nn.Linear(self.dim_input, self.dim_hidden),# 
-            nn.ReLU(),
-            nn.Linear(self.dim_hidden, self.dim_hidden),
-            nn.ReLU(),
-            nn.Linear(self.dim_hidden, self.dim_input)# 
-        )
-
-    def forward(self, x):
-        log_det_J = torch.zeros(x.size(0), device=x.device)
-
-        for i in range(self.num_blocks):
-            if i%2==0:
-                maski = 1- self.mask
-            else:
-                maski = self.mask
-
-            s = maski * self.scale_net[i](x * (1 - maski))
-            s = torch.tanh(s)#torch.tanh()
-            t = maski * self.translation_net[i](x * (1 - maski))
-
-            x = x*torch.exp(s) + t
-
-            log_det_J += torch.sum(s, dim=1)
-
-        return x, log_det_J
-
-    def reverse(self, z):
-        # log_det_J = torch.zeros(z.size(0), device=z.device)
-        for i in reversed(range(self.num_blocks)):
-            if i%2==0:
-                maski = 1- self.mask
-            else:
-                maski = self.mask
-
-            s = maski * self.scale_net[i](z * (1 - maski))
-            s = torch.tanh(s)
-            t = maski * self.translation_net[i](z * (1 - maski))
-            
-            z = (z - t) * torch.exp(-s)
-
-            # log_det_J += torch.sum(-s, dim=1)
-        return z
-
-    def sample(self, num_samples=1):
-        z = torch.randn((num_samples, self.dim_input), device=self.device)
-        samples = self.reverse(z)
-        return samples
-
-
-class IdentityTransform(nn.Module):
-    def __init__(self):
-        super(IdentityTransform, self).__init__()
-
-    def forward(self, x):
-        log_det_J = torch.zeros(x.size(0), device=x.device)
-        return x, log_det_J
-
-    def reverse(self, z):
-        return z
-    
-class SplineFlow(LazyNN):##DesignBaseline ##nn.Module
-    def __init__(self, dim_input, count_bins=8, bounds=3,device = 'cuda'): #cpu
-        super().__init__(dim_input)#, RealNVP, self
-        
-        self.dim_input = dim_input
-        self.countbins = count_bins
-        self.bounds = bounds
-        
-        if dim_input == 0:
-            self.spline_transform = T.Spline(dim_input, count_bins=count_bins, bound=bounds)
-        else:     # spline_coupling
-            # spl1 = spline_autoregressive1(dim_input,hidden_dims=[dim_input * 4+1, dim_input * 4+1], count_bins=count_bins, bound=bounds, order='linear')
-            # per1 = T.permute(dim_input)#T.Permute(torch.arange(dim_input, dtype=torch.long).flip(0))
-            # spl2 =spline_autoregressive1(dim_input,hidden_dims=[dim_input * 4+1, dim_input * 4+1], count_bins=count_bins, bound=bounds, order='linear')
-            # # per2 = T.Permute(torch.arange(dim_input, dtype=torch.long).flip(0)),per2
-            # self.spline_transform = T.ComposeTransform([spl1,per1,spl2],cache_size=0)
-            self.spline_transform = spline_autoregressive1(dim_input,n_flows=2,hidden_dims=[32, 32], count_bins=count_bins, bound=bounds, order='quadratic')
-
-    def forward(self, x):
-        z = self.spline_transform(x)
-        logDet = self.spline_transform.log_abs_det_jacobian(x, z)
-        return z, logDet
-
-    def reverse(self, z):
-        x = self.spline_transform.inv(z)
-        # logDet = self.spline_transform.log_abs_det_jacobian(z, x)
-        return x#, logDet
-
-from pyro.nn import AutoRegressiveNN
-def spline_autoregressive1(input_dim, n_flows = 8, hidden_dims=None, count_bins=8, bound=3.0, order='linear'):
-    r"""
-    A helper function to create an
-    :class:`~pyro.distributions.transforms.SplineAutoregressive` object that takes
-    care of constructing an autoregressive network with the correct input/output
-    dimensions.
-
-    :param input_dim: Dimension of input variable
-    :type input_dim: int
-    :param hidden_dims: The desired hidden dimensions of the autoregressive network.
-        Defaults to using [3*input_dim + 1]
-    :type hidden_dims: list[int]
-    :param count_bins: The number of segments comprising the spline.
-    :type count_bins: int
-    :param bound: The quantity :math:`K` determining the bounding box,
-        :math:`[-K,K]\times[-K,K]`, of the spline.
-    :type bound: float
-    :param order: One of ['linear', 'quadratic'] specifying the order of the spline.
-    :type order: string
-
-    """
-
-    if hidden_dims is None:
-        hidden_dims = [input_dim * 10, input_dim * 10]
-    # T.SplineCoupling
-    if order=='quadratic':
-        param_dims = [count_bins, count_bins, count_bins - 1]
-    else:
-        param_dims = [count_bins, count_bins, count_bins - 1, count_bins]
-        
-    arns = nn.ModuleList([AutoRegressiveNN(input_dim,
-            hidden_dims,
-            param_dims=param_dims) for _ in range(n_flows)])
-    
-    nfs = [T.SplineAutoregressive(input_dim, arns[0], count_bins=count_bins, bound=bound, order=order)]
-    for i in range(n_flows-1):
-        nfs.append(T.Permute(torch.arange(input_dim, dtype=torch.long).flip(0)))#T.Permute(torch.randperm(input_dim, dtype=torch.long)))#T.permute(dim_input)#
-        nfs.append(T.SplineAutoregressive(input_dim, arns[i], count_bins=count_bins, bound=bound, order=order))
-
-    return T.ComposeTransform(nfs,cache_size=0)
-    # arn = AutoRegressiveNN(input_dim, hidden_dims, param_dims=param_dims)
-    # return T.SplineAutoregressive(input_dim, arn, count_bins=count_bins, bound=bound, order=order)
-
-##############################################################################################
-##############################################################################################
-
-
-##############################################################################################
-###################################### Marg + Post MM ########################################
-##############################################################################################
-def cov(X):
-    D = X.shape[0]
-    mean = torch.mean(X, dim=0)
-    X = X - mean
-    return 1/(D-1) * X.transpose(-1, -2) @ X
-
-
-class VariationalMutualInformationOptimizer(object):
-    def __init__(
-        self, model, batch_size, data_source=None
-    ):
-        self.model = model
-        self.batch_size = batch_size
-        self.data_source = data_source
-
-    def _vectorized(self, fn, *shape, name="vectorization_plate"):
-        """
-        Wraps a callable inside an outermost :class:`~pyro.plate` to parallelize
-        MI computation over `num_particles`, and to broadcast batch shapes of
-        sample site functions in accordance with the `~pyro.plate` contexts
-        within which they are embedded.
-        :param fn: arbitrary callable containing Pyro primitives.
-        :return: wrapped callable.
-        """
-
-        def wrapped_fn(*args, **kwargs):
-            with pyro.plate_stack(name, shape):
-                return fn(*args, **kwargs)
-
-        return wrapped_fn
-
-    def get_primary_rollout(self, args, kwargs, graph_type="flat", detach=False):
-        """
-        sample data: batch_size number of examples -> return trace
-        """
-        if self.data_source is None:
-            model_v = self._vectorized(
-                self.model, self.batch_size, name="outer_vectorization"
-            )
-        else:
-            data = next(self.data_source)
-            model = pyro.condition(
-                self._vectorized(model, self.batch_size, name="outer_vectorization"),
-                data=data,
-            )
-
-        trace = poutine.trace(model_v, graph_type=graph_type).get_trace(*args, **kwargs)
-        if detach:
-            # what does the detach do?
-            trace.detach_()
-        trace = prune_subsample_sites(trace)
-        return trace
-
-    def _get_data(self, args, kwargs, graph_type="flat", detach=False):
-        # esample a trace and xtract the relevant data from it
-        trace = self.get_primary_rollout(args, kwargs, graph_type, detach)
-        designs = [
-            node["value"]
-            for node in trace.nodes.values()
-            if node.get("subtype") == "design_sample"
-        ]
-        observations = [
-            node["value"]
-            for node in trace.nodes.values()
-            if node.get("subtype") == "observation_sample"
-        ]
-        latents = [
-            node["value"]
-            for node in trace.nodes.values()
-            if node.get("subtype") == "latent_sample"
-        ]
-        latents = torch.cat(latents, axis=-1)
-        return (latents, *zip(designs, observations))
-
-
-# class MomentMatchMarginalPosterior(VariationalMutualInformationOptimizer):
-#     def __init__(self, model, batch_size, **kwargs):
-#         super().__init__(
-#             model=model, batch_size=batch_size
-#         )
-#         self.mu = 0
-#         self.Sigma = 0
-#         self.hX = 0
-#         self.hX_Y = 0      
-
-#     def differentiable_loss(self, *args, **kwargs):
-#         # sample from design
-#         latents, *history = self._get_data(args, kwargs)
-#         # print(history[0][0][0]) ### Check Design Value
-#         # set constants
-#         pi_const = 2*torch.acos(torch.zeros(1))
-#         e_const = torch.exp(torch.tensor([1]))
-#         dim_lat = latents.flatten(-2).shape[1]#latents.shape[1]#
-#         dim_obs = history[0][1].shape[1]
-        
-#         #compute loss
-#         data = torch.cat([latents.flatten(-2),history[0][1]],axis=1)#torch.cat([latents,history[0][1]],axis=1)#
-        
-#         Sigma = cov(data)
-#         self.hX = .5*torch.log(torch.linalg.det(Sigma[:dim_lat,:dim_lat]))+(dim_lat/2)*(torch.log(2*pi_const*e_const))
-#         hY = .5*torch.log(torch.linalg.det(Sigma[dim_lat:,dim_lat:]))+(dim_obs/2)*(torch.log(2*pi_const*e_const))
-#         hXY = .5*torch.log(torch.linalg.det(Sigma))+((dim_lat+dim_obs)/2)*(torch.log(2*pi_const*e_const))
-#         self.hX_Y = hXY-hY
-        
-#         # save optimal parameters for decision
-#         self.mu = torch.mean(data,axis=0)
-#         self.Sigma = Sigma
-#         # print(self.hX+self.hX_Y)
-#         return (self.hX+self.hX_Y)
-
-#     def loss(self, *args, **kwargs):
-#         """
-#         :returns: returns an estimate of the mutual information
-#         :rtype: float
-#         Evaluates the MI lower bound using the BA lower bound == -EIG
-#         """
-#         return self.hX-self.hX_Y
-
-class MomentMatchMarginalPosterior(VariationalMutualInformationOptimizer):
-    def __init__(self, model, batch_size, flow_x, flow_y,device, **kwargs):
-        super().__init__(
-            model=model, batch_size=batch_size
-        )
-        self.mu = 0
-        self.Sigma = 0
-        self.hX = 0
-        self.hX_Y = 0
-        self.fX = flow_x
-        self.gY = flow_y
-        self.pi_const = 2*torch.acos(torch.zeros(1)).to(device)
-        self.e_const = torch.exp(torch.tensor([1])).to(device)
-
-    def differentiable_loss(self, *args, **kwargs):
-        # sample from design
-        latents, *history = self._get_data(args, kwargs)
-        
-        dim_lat = latents.shape[1]#latents.flatten(-2).shape[1]#
-        dim_obs = history[0][1].shape[1]
-        
-        if hasattr(self.fX, "parameters"):
-            #! this is required for the pyro optimizer
-            pyro.module("flow_x_net", self.fX)
-        if hasattr(self.gY, "parameters"):
-            #! this is required for the pyro optimizer
-            pyro.module("flow_y_net", self.gY)
-        
-        mufX, logDetJfX = self.fX.forward(latents)#self.fX.forward(latents.flatten(-2))#
-        mugY, logDetJgY = self.gY.forward(history[0][1])#self.gY(history[0][1])#
-        
-        #compute loss
-        data = torch.cat([mufX,mugY],axis=1)#torch.cat([latents.flatten(-2),history[0][1]],axis=1)#torch.cat([latents,history[0][1]],axis=1)#
-        
-        Sigma = cov(data)+1e-4*torch.eye(dim_lat+dim_obs).to(latents.device)
-        self.hX = .5*torch.log(torch.linalg.det(Sigma[:dim_lat,:dim_lat]))+(dim_lat/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)
-        hY = .5*torch.log(torch.linalg.det(Sigma[dim_lat:,dim_lat:]))+(dim_obs/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY)
-        hXY = .5*torch.log(torch.linalg.det(Sigma))+((dim_lat+dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)-torch.mean(logDetJgY)
-        self.hX_Y = hXY-hY
-        hY_X = hXY-self.hX
-        
-        # save optimal parameters for decision
-        self.mu = torch.mean(data,axis=0)
-        self.Sigma = Sigma
-        # print(self.hX+self.hX_Y)
-        return self.hX+self.hX_Y-torch.detach(2*self.hX_Y)#+hY_X+hY
-
-    def loss(self, *args, **kwargs):
-        """
-        :returns: returns an estimate of the mutual information
-        :rtype: float
-        Evaluates the MI lower bound using the BA lower bound == -EIG
-        """
-        return self.hX-self.hX_Y
-
-##############################################################################################
-##############################################################################################
-
+# from pyro.util import torch_isnan, torch_isinf
+# def is_bad(a):
+#     return torch_isnan(a) or torch_isinf(a)
+from simulations import HiddenObjectsVar
+from flow_estimator_pyro import MomentMatchMarginalPosterior,SplineFlow, IdentityTransform, RealNVP
 
 def optimise_design(
     posterior_loc,
@@ -575,7 +65,7 @@ def optimise_design(
     ).to(device)
 
 
-    ho_model = HiddenObjects2(
+    ho_model = HiddenObjectsVar(
         design_net=design_net,
         theta_loc=posterior_loc,
         theta_covmat=posterior_cov,
@@ -663,12 +153,10 @@ def main_loop(
 ):
     pyro.clear_param_store()
 
-    # theta_loc = torch.zeros((num_sources, p), device=device)
-    # theta_covmat = torch.eye(p, device=device)
     theta_loc = torch.zeros((1, num_sources*p), device=device)
     theta_covmat = torch.eye(num_sources*p, device=device)
-    flow_theta = None#IdentityTransform()
-    flow_obs = None#IdentityTransform()
+    flow_theta = None
+    flow_obs = None
     prior = torch.distributions.MultivariateNormal(theta_loc, theta_covmat)
 
     # sample true param
@@ -678,7 +166,7 @@ def main_loop(
     observations_so_far = []
 
     # Set posterior equal to the prior
-    posterior_loc = theta_loc.reshape(-1)  # check if needs to be reshaped.
+    posterior_loc = theta_loc.reshape(-1)
     posterior_cov = torch.eye(p * num_sources, device=device)
 
     for t in range(0, T):
@@ -715,18 +203,17 @@ def main_loop(
             Sigmaxy = mi_loss_instance.Sigma[:p * num_sources,p * num_sources:].detach()
             Sigmayy = mi_loss_instance.Sigma[p * num_sources:,p * num_sources:].detach()
             obs, _ = mi_loss_instance.gY.forward(observation[0])
-            # obs = observation[0]
             posterior_loc = (mux + torch.matmul(Sigmaxy,torch.linalg.solve(Sigmayy,(obs-muy))).flatten())
-            print(true_theta)
-            print(posterior_loc)
-            print(mi_loss_instance.fX.reverse(posterior_loc))
+            max_posterior = mi_loss_instance.fX.reverse(posterior_loc)
+            # print(true_theta)
+            # print(posterior_loc)
+            # print(mi_loss_instance.fX.reverse(posterior_loc))
             posterior_cov = Sigmaxx-torch.matmul(Sigmaxy,torch.linalg.solve(Sigmayy,Sigmaxy.T))
             flow_theta = mi_loss_instance.fX
             flow_obs = mi_loss_instance.gY
-        ###################################################################################################
         
         designs_so_far.append(design[0])
-        observations_so_far.append(observation[0])#obs
+        observations_so_far.append(observation[0])
 
     print(f"Fitted posterior: mean = {posterior_loc}, cov = {posterior_cov}")
     print("True theta = ", true_theta.reshape(-1))
@@ -817,16 +304,16 @@ if __name__ == "__main__":
     parser.add_argument("--seed", default=-1, type=int)
     parser.add_argument("--physical-dim", default=2, type=int)
     parser.add_argument(
-        "--num-histories", help="Number of histories/rollouts", default=1, type=int#128
+        "--num-histories", help="Number of histories/rollouts", default=2, type=int#128
     )
-    parser.add_argument("--num-experiments", default=10, type=int)  # == T
+    parser.add_argument("--num-experiments", default=2, type=int)  # 10
     parser.add_argument("--batch-size", default=1024, type=int)#512
     parser.add_argument("--device", default="cpu", type=str)#"cuda"
     parser.add_argument(
         "--mlflow-experiment-name", default="locfin_mm_variational", type=str
     )
     parser.add_argument("--lr", default=0.005, type=float)#0.005
-    parser.add_argument("--num-steps", default=5000, type=int)#5000
+    parser.add_argument("--num-steps", default=500, type=int)#5000
     
     args = parser.parse_args()
 
@@ -845,160 +332,455 @@ if __name__ == "__main__":
     )
     
     
-########################################################################
-#################### Maybe for later use ###############################
-########################################################################
-# def gp_opt_w_history(loss_fn, num_steps, time_budget, num_parallel, num_acquisition, lengthscale,model, design_dim):
+##############################################################################################
+################################# Alternative Hidden Model ###################################
+##############################################################################################
+# from oed.primitives import observation_sample, latent_sample, compute_design
+# import pandas as pd
+# class HiddenObjects2(nn.Module):
+#     """Location finding example"""
 
-#     if time_budget is not None:
-#         num_steps = 100000000000
+#     def __init__(
+#         self,
+#         design_net,
+#         base_signal=0.1,  # G-map hyperparam
+#         max_signal=1e-4,  # G-map hyperparam
+#         theta_loc=None,  # prior on theta mean hyperparam
+#         theta_covmat=None,  # prior on theta covariance hyperparam
+#         flow_theta = None,
+#         noise_scale=None,  # this is the scale of the noise term
+#         p=1,  # physical dimension
+#         K=1,  # number of sources
+#         T=2,  # number of experiments
+#     ):
+#         super().__init__()
+#         self.design_net = design_net
+#         self.base_signal = base_signal
+#         self.max_signal = max_signal
+#         # Set prior:
+#         self.theta_loc = theta_loc if theta_loc is not None else torch.zeros(K*p)
+#         self.theta_covmat = theta_covmat if theta_covmat is not None else torch.eye(K*p)
+#         self.flow_theta = flow_theta if flow_theta is not None else IdentityTransform() #reverse
+#         self.theta_prior = dist.MultivariateNormal(
+#             self.theta_loc, self.theta_covmat
+#         )
+#         # Observations noise scale:
+#         self.noise_scale = noise_scale if noise_scale is not None else torch.tensor(1.0)
+#         self.n = 1  # samples per design=1
+#         self.p = p  # dimension of theta (location finding example will be 1, 2 or 3).
+#         self.K = K  # number of sources
+#         self.T = T  # number of experiments
+
+#     def forward_map(self, xi, theta):
+#         """Defines the forward map for the hidden object example
+#         y = G(xi, theta) + Noise.
+#         """
+#         # two norm squared
+#         sq_two_norm = (xi - theta).pow(2).sum(axis=-1)
+#         # add a small number before taking inverse (determines max signal)
+#         sq_two_norm_inverse = (self.max_signal + sq_two_norm).pow(-1)
+#         # sum over the K sources, add base signal and take log.
+#         mean_y = torch.log(self.base_signal + sq_two_norm_inverse.sum(-1, keepdim=True))
+#         return mean_y
+
+#     def model(self):
+#         if hasattr(self.design_net, "parameters"):
+#             #! this is required for the pyro optimizer
+#             pyro.module("design_net", self.design_net)
+
+#         ########################################################################
+#         # Sample latent variables theta
+#         ########################################################################
+#         theta = latent_sample("theta", self.theta_prior)
+#         with torch.no_grad():
+#             theta = self.flow_theta.reverse(theta)#.flatten(-1)
+#         theta = theta.reshape((len(theta),self.K,self.p))
+#         y_outcomes = []
+#         xi_designs = []
+
+#         # T-steps experiment
+#         for t in range(self.T):
+#             ####################################################################
+#             # Get a design xi; shape is [batch size x self.n x self.p]
+#             ####################################################################
+#             xi = compute_design(
+#                 f"xi{t + 1}", self.design_net.lazy(*zip(xi_designs, y_outcomes))
+#             )
+#             ####################################################################
+#             # Sample y at xi; shape is [batch size x 1]
+#             ####################################################################
+#             mean = self.forward_map(xi, theta)
+#             sd = self.noise_scale
+#             y = observation_sample(f"y{t + 1}", dist.Normal(mean, sd).to_event(1))
+
+#             ####################################################################
+#             # Update history
+#             ####################################################################
+#             y_outcomes.append(y)
+#             xi_designs.append(xi)
+
+#         return theta, xi_designs, y_outcomes
+
+#     def forward(self, theta):
+#         """Run the policy for a given theta"""
+#         self.design_net.eval()
+
+#         def conditioned_model():
+#             with pyro.plate_stack("expand_theta_test", [theta.shape[0]]):
+#                 # condition on theta
+#                 return pyro.condition(self.model, data={"theta": theta})()
+
+#         with torch.no_grad():
+#             theta, designs, observations = conditioned_model()
+#         self.design_net.train()
+#         return designs, observations
+
+#     def eval(self, n_trace=3, theta=None, verbose=True):
+#         """run the policy, print output and return it in a dataframe"""
+#         self.design_net.eval()
+
+#         if theta is None:
+#             theta = self.theta_prior.sample(torch.Size([n_trace]))
+#             # theta = self.flow_theta.reverse(theta)
+#         else:
+#             theta = theta.unsqueeze(0).expand(n_trace, *theta.shape)
+#             # dims: [n_trace * number of thetas given, shape of theta]
+#             theta = theta.reshape(-1, *theta.shape[2:])
+
+#         designs, observations = self.forward(theta)
+#         output = []
+#         true_thetas = []
+
+#         for i in range(n_trace):
+#             if verbose:
+#                 print("\nExample run {}".format(i + 1))
+#                 print(f"*True Theta: {theta[i].cpu()}*")
+#             run_xis = []
+#             run_ys = []
+#             # Print optimal designs, observations for given theta
+#             for t in range(self.T):
+#                 xi = designs[t][i].detach().cpu().reshape(-1)
+#                 run_xis.append(xi)
+#                 y = observations[t][i].detach().cpu().item()
+#                 run_ys.append(y)
+#                 if verbose:
+#                     print(f"xi{t + 1}: {xi},   y{t + 1}: {y}")
+#             run_df = pd.DataFrame(torch.stack(run_xis).numpy())
+#             run_df.columns = [f"xi_{i}" for i in range(self.p)]
+#             run_df["observations"] = run_ys
+#             run_df["order"] = list(range(1, self.T + 1))
+#             run_df["run_id"] = i + 1
+#             output.append(run_df)
+
+#         self.design_net.train()
+#         return pd.concat(output), theta.cpu().numpy()
+# ##############################################################################################
+# ##############################################################################################
+
+# ##############################################################################################
+# ######################################### Flows ##############################################
+# ##############################################################################################
+# from neural.modules import LazyDelta
+# class LazyNN(nn.Module):
+#     def __init__(self, design_dim):
+#         super().__init__()
+#         self.register_buffer("prototype", torch.zeros(design_dim))
+
+#     def lazy(self, x):
+#         def delayed_function():
+#             return self.forward(x)
+
+#         lazy_delta = LazyDelta(
+#             delayed_function, self.prototype, event_dim=self.prototype.dim()
+#         )
+#         return lazy_delta
+
+# class RealNVP(LazyNN):
+#     def __init__(self, dim_input, num_blocks=5, dim_hidden=256,device = 'cpu'): #'cuda'
+#         super().__init__(dim_input)
+        
+#         self.dim_input = dim_input
+#         self.num_blocks = num_blocks
+#         self.dim_hidden = dim_hidden
+
+#         self.scale_net = nn.ModuleList([self._scale_block() for _ in range(num_blocks)])
+#         self.translation_net = nn.ModuleList([self._translation_block() for _ in range(num_blocks)])
+#         mask = torch.ones(dim_input).to(device)
+#         mask[int(dim_input / 2):] = 0
+#         mask.requires_grad = False
+#         self.mask = mask
+
+#     def _scale_block(self):
+#         return nn.Sequential(
+#             nn.Linear(self.dim_input, self.dim_hidden),#
+#             nn.ReLU(),
+#             nn.Linear(self.dim_hidden, self.dim_hidden),
+#             nn.ReLU(),
+#             nn.Linear(self.dim_hidden, self.dim_input),#
+#             nn.Tanh()
+#         )
+
+#     def _translation_block(self):
+#         return nn.Sequential(
+#             nn.Linear(self.dim_input, self.dim_hidden),# 
+#             nn.ReLU(),
+#             nn.Linear(self.dim_hidden, self.dim_hidden),
+#             nn.ReLU(),
+#             nn.Linear(self.dim_hidden, self.dim_input)# 
+#         )
+
+#     def forward(self, x):
+#         log_det_J = torch.zeros(x.size(0), device=x.device)
+
+#         for i in range(self.num_blocks):
+#             if i%2==0:
+#                 maski = 1- self.mask
+#             else:
+#                 maski = self.mask
+
+#             s = maski * self.scale_net[i](x * (1 - maski))
+#             s = torch.tanh(s)#torch.tanh()
+#             t = maski * self.translation_net[i](x * (1 - maski))
+
+#             x = x*torch.exp(s) + t
+
+#             log_det_J += torch.sum(s, dim=1)
+
+#         return x, log_det_J
+
+#     def reverse(self, z):
+#         # log_det_J = torch.zeros(z.size(0), device=z.device)
+#         for i in reversed(range(self.num_blocks)):
+#             if i%2==0:
+#                 maski = 1- self.mask
+#             else:
+#                 maski = self.mask
+
+#             s = maski * self.scale_net[i](z * (1 - maski))
+#             s = torch.tanh(s)
+#             t = maski * self.translation_net[i](z * (1 - maski))
+            
+#             z = (z - t) * torch.exp(-s)
+
+#             # log_det_J += torch.sum(-s, dim=1)
+#         return z
+
+#     def sample(self, num_samples=1):
+#         z = torch.randn((num_samples, self.dim_input), device=self.device)
+#         samples = self.reverse(z)
+#         return samples
+
+
+# class IdentityTransform(nn.Module):
+#     def __init__(self):
+#         super(IdentityTransform, self).__init__()
+
+#     def forward(self, x):
+#         log_det_J = torch.zeros(x.size(0), device=x.device)
+#         return x, log_det_J
+
+#     def reverse(self, z):
+#         return z
     
-#     est_loss_history = []
-#     xi_history = []
-#     t = time.time()
-#     wall_times = []
-#     run_times = []
-#     X = .01 + 4.99 * torch.rand((num_parallel, num_acquisition, design_dim))
-#     with torch.no_grad():
-#             model.design_net.designs[0][0]=X.flatten()
-#     y = loss_fn(X)
+# class SplineFlow(LazyNN):
+#     def __init__(self, dim_input, count_bins=8, bounds=3,device = 'cpu'): #'cuda'
+#         super().__init__(dim_input)
+        
+#         self.dim_input = dim_input
+#         self.countbins = count_bins
+#         self.bounds = bounds
+        
+#         if dim_input == 0:
+#             self.spline_transform = T.Spline(dim_input, count_bins=count_bins, bound=bounds)
+#         else:
+#             self.spline_transform = spline_autoregressive1(dim_input,n_flows=2,hidden_dims=[32, 32], count_bins=count_bins, bound=bounds, order='quadratic')
 
-#     # GPBO
-#     y = y.detach().clone()
-#     kernel = gp.kernels.Matern52(input_dim=1, lengthscale=torch.tensor(lengthscale),
-#                                  variance=torch.tensor(1.))
-#     constraint = torch.distributions.constraints.interval(1e-2, 5.)
-#     noise = torch.tensor(0.5).pow(2)
+#     def forward(self, x):
+#         z = self.spline_transform(x)
+#         logDet = self.spline_transform.log_abs_det_jacobian(x, z)
+#         return z, logDet
 
-#     def gp_conditional(Lff, Xnew, X, y):
-#         KXXnew = kernel(X[0], Xnew[0])#########################################################
-#         LiK = torch.triangular_solve(KXXnew, Lff, upper=False)[0]
-#         Liy = torch.triangular_solve(y.unsqueeze(-1), Lff, upper=False)[0]
-#         mean = rmv(LiK.transpose(-1, -2), Liy.squeeze(-1))
-#         KXnewXnew = kernel(Xnew[0])
-#         var = (KXnewXnew - LiK.transpose(-1, -2).matmul(LiK)).diagonal(dim1=-2, dim2=-1)
-#         return mean, var
+#     def reverse(self, z):
+#         x = self.spline_transform.inv(z)
+#         # logDet = self.spline_transform.log_abs_det_jacobian(z, x)
+#         return x#, logDet
 
-#     def acquire(X, y, sigma, nacq):
-#         Kff = kernel(X[0])##################################
-#         Kff += noise * torch.eye(Kff.shape[-1])
-#         Lff = Kff.cholesky(upper=False)
-#         Xinit = .01 + 4.99 * torch.rand((num_parallel, nacq, design_dim))
-#         unconstrained_Xnew = transform_to(constraint).inv(Xinit).detach().clone().requires_grad_(True)
-#         minimizer = torch.optim.LBFGS([unconstrained_Xnew], max_eval=20)
+# def spline_autoregressive1(input_dim, n_flows = 8, hidden_dims=None, count_bins=8, bound=3.0, order='linear'):
+#     r"""
+#     A helper function to create an
+#     :class:`~pyro.distributions.transforms.SplineAutoregressive` object that takes
+#     care of constructing an autoregressive network with the correct input/output
+#     dimensions.
 
-#         def gp_ucb1():
-#             minimizer.zero_grad()
-#             Xnew = transform_to(constraint)(unconstrained_Xnew)
-#             mean, var = gp_conditional(Lff, Xnew, X, y)
-#             ucb = -(mean + sigma * var.clamp(min=0.).sqrt())
-#             ucb[is_bad(ucb)] = 0.
-#             loss = ucb.sum()
-#             torch.autograd.backward(unconstrained_Xnew,
-#                                     torch.autograd.grad(loss, unconstrained_Xnew))
-#             return loss
+#     :param input_dim: Dimension of input variable
+#     :type input_dim: int
+#     :param hidden_dims: The desired hidden dimensions of the autoregressive network.
+#         Defaults to using [3*input_dim + 1]
+#     :type hidden_dims: list[int]
+#     :param count_bins: The number of segments comprising the spline.
+#     :type count_bins: int
+#     :param bound: The quantity :math:`K` determining the bounding box,
+#         :math:`[-K,K]\times[-K,K]`, of the spline.
+#     :type bound: float
+#     :param order: One of ['linear', 'quadratic'] specifying the order of the spline.
+#     :type order: string
 
-#         minimizer.step(gp_ucb1)
-#         X_acquire = transform_to(constraint)(unconstrained_Xnew).detach().clone()
-#         y_expected, _ = gp_conditional(Lff, X_acquire, X, y)
+#     """
 
-#         return X_acquire, y_expected
+#     if hidden_dims is None:
+#         hidden_dims = [input_dim * 10, input_dim * 10]
 
-#     def find_gp_max(X, y, n_tries=100):
-#         X_star = torch.zeros(num_parallel, 1, design_dim)
-#         y_star = torch.zeros(num_parallel, 1)
-#         for j in range(n_tries):  # Cannot parallelize this because sometimes LBFGS goes bad across a whole batch
-#             X_star_new, y_star_new = acquire(X, y, 0, 1)
-#             y_star_new[is_bad(y_star_new)] = 0.
-#             mask = y_star_new > y_star
-#             y_star[mask, ...] = y_star_new[mask, ...]
-#             X_star[mask, ...] = X_star_new[mask, ...]
+#     if order=='quadratic':
+#         param_dims = [count_bins, count_bins, count_bins - 1]
+#     else:
+#         param_dims = [count_bins, count_bins, count_bins - 1, count_bins]
+        
+#     arns = nn.ModuleList([AutoRegressiveNN(input_dim,
+#             hidden_dims,
+#             param_dims=param_dims) for _ in range(n_flows)])
+    
+#     nfs = [T.SplineAutoregressive(input_dim, arns[0], count_bins=count_bins, bound=bound, order=order)]
+#     for i in range(n_flows-1):
+#         nfs.append(T.Permute(torch.arange(input_dim, dtype=torch.long).flip(0)))
+#         nfs.append(T.SplineAutoregressive(input_dim, arns[i], count_bins=count_bins, bound=bound, order=order))
 
-#         return X_star.squeeze(), y_star.squeeze()
+#     return T.ComposeTransform(nfs,cache_size=0)
 
-#     for i in range(num_steps):
-#         X_acquire, _ = acquire(X, y, 2, num_acquisition)
-#         y_acquire = loss_fn(X_acquire.flatten()).detach().clone()
-#         X = torch.cat([X, X_acquire], dim=-2)
-#         y = torch.cat([y, y_acquire], dim=-1)
-#         run_times.append(time.time() - t)
-
-#         if time_budget and time.time() - t > time_budget:
-#             break
-
-#     final_time = time.time() - t
-
-#     for i in range(1, len(run_times)+1):
-
-#         if i % 10 == 0:
-#             s = num_acquisition * i
-#             X_star, y_star = find_gp_max(X[:, :s, :], y[:s])#y[:, :s]
-#             print(X_star)
-#             est_loss_history.append(y_star)
-#             xi_history.append(X_star.detach().clone())
-#             wall_times.append(run_times[i-1])
-
-#     # Record the final GP max
-#     X_star, y_star = find_gp_max(X, y)
-#     xi_history.append(X_star.detach().clone())
-#     wall_times.append(final_time)
-
-#     est_loss_history = torch.stack(est_loss_history)
-#     xi_history = torch.stack(xi_history)
-#     wall_times = torch.tensor(wall_times)
-
-#     return xi_history, est_loss_history, wall_times
+# ##############################################################################################
+# ##############################################################################################
 
 
-##############################################################################################
-########################### Optimization Functions ###########################################
-##############################################################################################
-# def get_git_revision_hash():
-#     return subprocess.check_output(['git', 'rev-parse', 'HEAD'])
-
-# def opt_eig_loss_w_history(design, loss_fn, num_samples, num_steps, optim, time_budget):
-#     if time_budget is not None:
-#         num_steps = 100000000000
-#     params = None
-#     est_loss_history = []
-#     xi_history = []
-#     t = time.time()
-#     wall_times = []
-#     for step in range(num_steps):
-#         if params is not None:
-#             pyro.infer.util.zero_grads(params)
-#         with poutine.trace(param_only=True) as param_capture:
-#             agg_loss, loss = loss_fn(design, num_samples, evaluation=True)
-#         params = set(site["value"].unconstrained()
-#                      for site in param_capture.trace.nodes.values())
-#         if torch.isnan(agg_loss):
-#             raise ArithmeticError("Encountered NaN loss in opt_eig_ape_loss")
-#         agg_loss.backward(retain_graph=True)
-#         if step % 200 == 0:
-#             est_loss_history.append(loss)
-#             wall_times.append(time.time() - t)
-#             xi_history.append(pyro.param('xi').detach().clone())
-#         optim(params)
-#         optim.step()
-#         print(pyro.param("xi"))
-#         if time.time() - t > time_budget:
-#             break
-
-#     xi_history.append(pyro.param('xi').detach().clone())
-#     wall_times.append(time.time() - t)
-
-#     est_loss_history = torch.stack(est_loss_history)
-#     xi_history = torch.stack(xi_history)
-#     wall_times = torch.tensor(wall_times)
-
-#     return xi_history, est_loss_history, wall_times
-##############################################################################################
-##############################################################################################
+# ##############################################################################################
+# ###################################### Marg + Post MM ########################################
+# ##############################################################################################
+# def cov(X):
+#     D = X.shape[0]
+#     mean = torch.mean(X, dim=0)
+#     X = X - mean
+#     return 1/(D-1) * X.transpose(-1, -2) @ X
 
 
+# class VariationalMutualInformationOptimizer(object):
+#     def __init__(
+#         self, model, batch_size, data_source=None
+#     ):
+#         self.model = model
+#         self.batch_size = batch_size
+#         self.data_source = data_source
 
+#     def _vectorized(self, fn, *shape, name="vectorization_plate"):
+#         """
+#         Wraps a callable inside an outermost :class:`~pyro.plate` to parallelize
+#         MI computation over `num_particles`, and to broadcast batch shapes of
+#         sample site functions in accordance with the `~pyro.plate` contexts
+#         within which they are embedded.
+#         :param fn: arbitrary callable containing Pyro primitives.
+#         :return: wrapped callable.
+#         """
 
+#         def wrapped_fn(*args, **kwargs):
+#             with pyro.plate_stack(name, shape):
+#                 return fn(*args, **kwargs)
 
+#         return wrapped_fn
 
-########################################################################
-########################################################################
+#     def get_primary_rollout(self, args, kwargs, graph_type="flat", detach=False):
+#         """
+#         sample data: batch_size number of examples -> return trace
+#         """
+#         if self.data_source is None:
+#             model_v = self._vectorized(
+#                 self.model, self.batch_size, name="outer_vectorization"
+#             )
+#         else:
+#             data = next(self.data_source)
+#             model = pyro.condition(
+#                 self._vectorized(model, self.batch_size, name="outer_vectorization"),
+#                 data=data,
+#             )
+
+#         trace = poutine.trace(model_v, graph_type=graph_type).get_trace(*args, **kwargs)
+#         if detach:
+#             # what does the detach do?
+#             trace.detach_()
+#         trace = prune_subsample_sites(trace)
+#         return trace
+
+#     def _get_data(self, args, kwargs, graph_type="flat", detach=False):
+#         # esample a trace and xtract the relevant data from it
+#         trace = self.get_primary_rollout(args, kwargs, graph_type, detach)
+#         designs = [
+#             node["value"]
+#             for node in trace.nodes.values()
+#             if node.get("subtype") == "design_sample"
+#         ]
+#         observations = [
+#             node["value"]
+#             for node in trace.nodes.values()
+#             if node.get("subtype") == "observation_sample"
+#         ]
+#         latents = [
+#             node["value"]
+#             for node in trace.nodes.values()
+#             if node.get("subtype") == "latent_sample"
+#         ]
+#         latents = torch.cat(latents, axis=-1)
+#         return (latents, *zip(designs, observations))
+
+# class MomentMatchMarginalPosterior(VariationalMutualInformationOptimizer):
+#     def __init__(self, model, batch_size, flow_x, flow_y,device, **kwargs):
+#         super().__init__(
+#             model=model, batch_size=batch_size
+#         )
+#         self.mu = 0
+#         self.Sigma = 0
+#         self.hX = 0
+#         self.hX_Y = 0
+#         self.fX = flow_x
+#         self.gY = flow_y
+#         self.pi_const = 2*torch.acos(torch.zeros(1)).to(device)
+#         self.e_const = torch.exp(torch.tensor([1])).to(device)
+
+#     def differentiable_loss(self, *args, **kwargs):
+#         # sample from design
+#         latents, *history = self._get_data(args, kwargs)
+        
+#         dim_lat = latents.shape[1]
+#         dim_obs = history[0][1].shape[1]
+        
+#         if hasattr(self.fX, "parameters"):
+#             #! this is required for the pyro optimizer
+#             pyro.module("flow_x_net", self.fX)
+#         if hasattr(self.gY, "parameters"):
+#             #! this is required for the pyro optimizer
+#             pyro.module("flow_y_net", self.gY)
+        
+#         mufX, logDetJfX = self.fX.forward(latents)
+#         mugY, logDetJgY = self.gY.forward(history[0][1])
+        
+#         #compute loss
+#         data = torch.cat([mufX,mugY],axis=1)
+        
+#         Sigma = cov(data)+1e-4*torch.eye(dim_lat+dim_obs).to(latents.device)
+#         self.hX = .5*torch.log(torch.linalg.det(Sigma[:dim_lat,:dim_lat]))+(dim_lat/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)
+#         hY = .5*torch.log(torch.linalg.det(Sigma[dim_lat:,dim_lat:]))+(dim_obs/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY)
+#         hXY = .5*torch.log(torch.linalg.det(Sigma))+((dim_lat+dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)-torch.mean(logDetJgY)
+#         self.hX_Y = hXY-hY
+#         hY_X = hXY-self.hX
+        
+#         # save optimal parameters for decision
+#         self.mu = torch.mean(data,axis=0)
+#         self.Sigma = Sigma
+#         return self.hX+self.hX_Y+hY_X+hY-torch.detach(2*self.hX_Y+hY_X+hY)
+
+#     def loss(self, *args, **kwargs):
+#         """
+#         :returns: returns an estimate of the mutual information
+#         :rtype: float
+#         Evaluates the MI lower bound using the BA lower bound == -EIG
+#         """
+#         return self.hX-self.hX_Y
+
+# ##############################################################################################
+# ##############################################################################################
+

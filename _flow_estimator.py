@@ -339,8 +339,8 @@ class MaskedSplineFlows(NFModel):
         data_mean: (ndarray) Mean of Gaussian base distribution
         data_cov: (ndarray) Covariance of Gaussian base distribution
     """
-    affine_coupling_f: Transformed#List[MaskedCouplingLayer]#
-    affine_coupling_g: Transformed#List[MaskedCouplingLayer]#
+    affine_coupling_f: Transformed
+    affine_coupling_g: Transformed
     _n_features_x: int
     _n_features_y: int
 
@@ -372,9 +372,12 @@ class MaskedSplineFlows(NFModel):
     def __init__(self,
                 n_features_x: int,
                 n_features_y: int,
-                n_layer: int,
-                n_hidden: int,
                 key: jax.random.PRNGKey,
+                flow_layers: int = 8,
+                nn_width: int = 50,
+                nn_depth: int = 1,
+                knots: int = 8,
+                interval: int = 4,
                 **kwargs):
         f_subkey, g_subkey = jax.random.split(key, 2)
         
@@ -394,22 +397,22 @@ class MaskedSplineFlows(NFModel):
         self._n_features_x = n_features_x
         self.affine_coupling_f = masked_autoregressive_flow(f_subkey,
                                                             base_dist=Normal(jnp.zeros(n_features_x)),
-                                                            transformer=RationalQuadraticSpline(knots=8, 
-                                                                                                interval=4),
-                                                            flow_layers=8,
-                                                            # nn_width= 10,
-                                                            # nn_depth=1,
+                                                            transformer=RationalQuadraticSpline(knots=knots, 
+                                                                                                interval=interval),
+                                                            flow_layers=flow_layers,
+                                                            nn_width= nn_width,
+                                                            nn_depth=nn_depth,
                                                             invert = False,
                                                             )
         
         self._n_features_y = n_features_y 
         self.affine_coupling_g = masked_autoregressive_flow(g_subkey,
                                                             base_dist=Normal(jnp.zeros(n_features_y)),
-                                                            transformer=RationalQuadraticSpline(knots=8, 
-                                                                                                interval=4),
-                                                            flow_layers=8,
-                                                            # nn_width= 50,
-                                                            # nn_depth=1,
+                                                            transformer=RationalQuadraticSpline(knots=knots, 
+                                                                                                interval=interval),
+                                                            flow_layers=flow_layers,
+                                                            nn_width= nn_width,
+                                                            nn_depth=nn_depth,
                                                             invert = False,
                                                             )
         
@@ -429,9 +432,9 @@ class MaskedSplineFlows(NFModel):
         return x, log_det_df, y, log_det_dg
 
 
-@eqx.filter_jit#@jax.jit#
-def _MMFlows_value(
-    flows: MaskedSplineFlows,#RealNVP,#
+@eqx.filter_jit
+def _FlowMP_value(
+    flows: MaskedSplineFlows,
     xs: jnp.ndarray,
     ys: jnp.ndarray):
     n_sample, dim_x = xs.shape
@@ -452,7 +455,7 @@ def _MMFlows_value(
     return value
 
 @eqx.filter_value_and_grad
-def loss_function(flows, xs, ys):
+def loss_function_FlowMargPost(flows, xs, ys):
     n_sample, dim_x = xs.shape
     _, dim_y = ys.shape
     flows_vmap = jax.vmap(flows, in_axes=(0, 0))
@@ -469,22 +472,78 @@ def loss_function(flows, xs, ys):
     hY_X = hXY-hX
     
     
-    loss = hX + hX_Y + hY_X + hY#
+    loss = hX + hX_Y + hY_X + hY
     return loss+jax.lax.stop_gradient(hX-hX_Y-loss)
 
 
-def _MMFlow_value_neg_grad(
-    flows: MaskedSplineFlows,#RealNVP,#
+def _FlowMargPost_value_neg_grad(
+    flows: MaskedSplineFlows,
     xs: jnp.ndarray,
     ys: jnp.ndarray):
     # Define functions to compute gradients using JAX's autograd
-    value, neg_grad = loss_function(flows, xs, ys)
+    value, neg_grad = loss_function_FlowMargPost(flows, xs, ys)
     return value, neg_grad
 
 
-def MMFlow_training(
+@eqx.filter_jit
+def _FlowP_value(
+    flows: MaskedSplineFlows,
+    xs: jnp.ndarray,
+    ys: jnp.ndarray):
+    n_sample, dim_x = xs.shape
+    _, dim_y = ys.shape
+    flows_vmap = jax.vmap(flows, in_axes=(0, 0))
+    fX, logDetJfX, gY, logDetJgY = flows_vmap(xs, ys)
+    fX_gY = jnp.concatenate((fX, gY), axis=1)
+    
+    Sigma = jnp.cov(fX_gY.T)
+
+    mux = jnp.zeros(dim_x)
+    Sigmax = jnp.eye(dim_x)
+    logmarg = jax.scipy.stats.multivariate_normal.logpdf(xs, mux, Sigmax)
+    hX = -jnp.mean(logmarg)
+    
+    hXY = 0.5 * jnp.linalg.slogdet(Sigma)[1] + (dim_x+dim_y) / 2 * (1 + jnp.log(2 * jnp.pi)) - (1 / n_sample) * jnp.sum(logDetJfX)#- (1 / n_sample) * jnp.sum(logDetJgY)
+    hY = 0.5 * jnp.linalg.slogdet(Sigma[dim_x:, dim_x:])[1] + dim_y / 2 * (1 + jnp.log(2 * jnp.pi))# - (1 / n_sample) * jnp.sum(logDetJgY)
+    hX_Y = hXY-hY
+    
+    value = hX - hX_Y
+    return value
+
+@eqx.filter_value_and_grad
+def loss_function_FlowPost(flows, xs, ys):
+    n_sample, dim_x = xs.shape
+    _, dim_y = ys.shape
+    flows_vmap = jax.vmap(flows, in_axes=(0, 0))
+    fX, logDetJfX, gY, logDetJgY = flows_vmap(xs, ys)
+    fX_gY = jnp.concatenate((fX, gY), axis=1)
+    
+    Sigma = jnp.cov(fX_gY.T) + 1e-4*jnp.eye(dim_x+dim_y)
+    
+    mux = jnp.zeros(dim_x)
+    Sigmax = jnp.eye(dim_x)
+    logmarg = jax.scipy.stats.multivariate_normal.logpdf(xs, mux, Sigmax)
+    # hX = 0.5 * jnp.linalg.slogdet(Sigma[:dim_x, :dim_x])[1] + dim_x / 2 * (1 + jnp.log(2 * jnp.pi)) - (1 / n_sample) * jnp.sum(logDetJfX)
+    
+    hXY = 0.5 * jnp.linalg.slogdet(Sigma)[1] + (dim_x+dim_y) / 2 * (1 + jnp.log(2 * jnp.pi)) - (1 / n_sample) * jnp.sum(logDetJfX)- (1 / n_sample) * jnp.sum(logDetJgY)
+    hY = 0.5 * jnp.linalg.slogdet(Sigma[dim_x:, dim_x:])[1] + dim_y / 2 * (1 + jnp.log(2 * jnp.pi)) - (1 / (n_sample)) * jnp.sum(logDetJgY)
+    hX_Y = hXY-hY
+    
+    
+    loss = hX_Y
+    return loss +jax.lax.stop_gradient(-jnp.mean(logmarg)-2*hX_Y)
+
+def _FlowPost_value_neg_grad(
+    flows: MaskedSplineFlows,
+    xs: jnp.ndarray,
+    ys: jnp.ndarray):
+    # Define functions to compute gradients using JAX's autograd
+    value, neg_grad = loss_function_FlowPost(flows, xs, ys)
+    return value, neg_grad
+
+def Flow_training(
     rng: jax.random.PRNGKeyArray,
-    flows: NFModel,#eqx.Module,
+    flows: NFModel,
     xs: BatchedPoints,
     ys: BatchedPoints,
     xs_test: Optional[BatchedPoints] = None,
@@ -492,9 +551,10 @@ def MMFlow_training(
     batch_size: Optional[int] = 256,
     test_every_n_steps: int = 250,
     max_n_steps: int = 2_000,
-    early_stopping: bool = False,#True,#
+    early_stopping: bool = False,
     learning_rate: float = 0.1,
     verbose: bool = False,
+    MargPost_loss:  bool = True
 ) -> tuple[TrainingLog, eqx.Module]:
     """Basic training loop for MINE.
 
@@ -526,20 +586,27 @@ def MMFlow_training(
     opt_state = optimizer.init(eqx.filter(flows, eqx.is_array))
 
     # compile the training step   flows.affine_coupling_g.base_dist.scale
-    @eqx.filter_jit#@jax.jit#
+    @eqx.filter_jit
     def step(
         *,
         flows,
         opt_state,
+        MargPost_loss,
         xs: BatchedPoints,
         ys: BatchedPoints):
         
-        value, neg_grad = _MMFlow_value_neg_grad(
-            flows=flows,
-            xs=xs,
-            ys=ys)
+        if MargPost_loss:
+            value, neg_grad = _FlowMargPost_value_neg_grad(
+                flows=flows,
+                xs=xs,
+                ys=ys)
+        else:
+            value, neg_grad = _FlowPost_value_neg_grad(
+                flows=flows,
+                xs=xs,
+                ys=ys)
         
-        updates, opt_state = optimizer.update(neg_grad, opt_state)#,flows
+        updates, opt_state = optimizer.update(neg_grad, opt_state)
         flows = eqx.apply_updates(flows, updates)
         return flows, opt_state, value
         
@@ -560,6 +627,7 @@ def MMFlow_training(
         flows, opt_state, mi_train = step(
             flows=flows,
             opt_state = opt_state,
+            MargPost_loss= MargPost_loss,
             xs=batch_xs,
             ys=batch_ys)
 
@@ -568,9 +636,14 @@ def MMFlow_training(
 
         # logging test
         if n_step % test_every_n_steps == 0:
-            mi_test = _MMFlows_value(
-                flows=flows, xs=xs_test, ys=ys_test
-            )
+            if MargPost_loss:
+                mi_test = _FlowMP_value(
+                    flows=flows, xs=xs_test, ys=ys_test
+                )
+            else:
+                mi_test = _FlowP_value(
+                    flows=flows, xs=xs_test, ys=ys_test
+                )
             training_log.log_test_mi(n_step, mi_test)
             
         # early stop?
@@ -578,11 +651,10 @@ def MMFlow_training(
             break
 
     training_log.finish()
-    plot_final(flows, xs, ys)
     return training_log, flows
 
 
-class MMFLowParams(BaseModel):
+class FlowParams(BaseModel):
     batch_size: pydantic.PositiveInt
     max_n_steps: pydantic.PositiveInt
     train_test_split: Optional[pydantic.confloat(gt=0.0, lt=1.0)]
@@ -590,10 +662,13 @@ class MMFLowParams(BaseModel):
     learning_rate: pydantic.PositiveFloat
     standardize: bool
     seed: int
-    num_blocks: pydantic.PositiveInt
-    hidden_features: pydantic.PositiveInt
+    flow_layers: pydantic.PositiveInt
+    nn_width: pydantic.PositiveInt
+    nn_depth: pydantic.PositiveInt
+    knots: pydantic.PositiveInt
+    interval: pydantic.PositiveInt
 
-class MMFLowEstimator(IMutualInformationPointEstimator):
+class FlowMargPostEstimator(IMutualInformationPointEstimator):
     def __init__(
         self,
         batch_size: int =  _estimators._DEFAULT_BATCH_SIZE,
@@ -601,13 +676,16 @@ class MMFLowEstimator(IMutualInformationPointEstimator):
         train_test_split: Optional[float] = _estimators._DEFAULT_TRAIN_TEST_SPLIT,
         test_every_n_steps: int = _estimators._DEFAULT_TEST_EVERY_N,
         learning_rate: float = _estimators._DEFAULT_LEARNING_RATE,
-        num_blocks: int = 4,
-        hidden_features: int = 64,
+        flow_layers: int = 8,
+        nn_width: int = 50,
+        nn_depth: int = 1,
+        knots: int = 8,
+        interval: int = 4,
         standardize: bool = _estimators._DEFAULT_STANDARDIZE,
         verbose: bool = _estimators._DEFAULT_VERBOSE,
         seed: int = _estimators._DEFAULT_SEED,
     ) -> None:
-        self._params = MMFLowParams(
+        self._params = FlowParams(
             batch_size=batch_size,
             max_n_steps=max_n_steps,
             train_test_split=train_test_split,
@@ -615,8 +693,11 @@ class MMFLowEstimator(IMutualInformationPointEstimator):
             learning_rate=learning_rate,
             standardize=standardize,
             seed=seed,
-            num_blocks = num_blocks,
-            hidden_features = hidden_features)
+            flow_layers = flow_layers, 
+            nn_width = nn_width,
+            nn_depth = nn_depth,
+            knots = knots,
+            interval = interval)
         
         self._verbose = verbose
         self._training_log: Optional[TrainingLog] = None
@@ -637,12 +718,18 @@ class MMFLowEstimator(IMutualInformationPointEstimator):
         """
         return self._trained_flows
 
-    def parameters(self) -> MMFLowParams:
+    def parameters(self) -> FlowParams:
         return self._params
 
     def _create_flows(self, dim_x: int, dim_y: int, key: jax.random.PRNGKeyArray) -> MaskedSplineFlows:#RealNVP:#
-        return MaskedSplineFlows(n_features_x = dim_x, n_features_y = dim_y, n_layer = self._params.num_blocks, n_hidden = self._params.hidden_features, key=key)
-        # return RealNVP(n_features_x = dim_x, n_features_y = dim_y, n_layer = self._params.num_blocks, n_hidden = self._params.hidden_features, key=key)
+        return MaskedSplineFlows(n_features_x = dim_x, 
+                                 n_features_y = dim_y, 
+                                 key=key, 
+                                 flow_layers = self._params.flow_layers, 
+                                 nn_width = self._params.nn_width,
+                                 nn_depth = self._params.nn_depth,
+                                 knots = self._params.knots,
+                                 interval = self._params.interval,)
     
     def estimate_with_info(self, x: ArrayLike, y: ArrayLike) -> EstimateResult:
         key = jax.random.PRNGKey(self._params.seed)
@@ -660,7 +747,7 @@ class MMFLowEstimator(IMutualInformationPointEstimator):
         # initialize critic
         _flows = self._create_flows(dim_x=space.dim_x, dim_y=space.dim_y, key=key_init)
 
-        training_log, trained_flows = MMFlow_training(
+        training_log, trained_flows = Flow_training(
             rng=key_fit,
             flows = _flows,
             xs=xs_train,
@@ -672,6 +759,7 @@ class MMFLowEstimator(IMutualInformationPointEstimator):
             max_n_steps=self._params.max_n_steps,
             learning_rate=self._params.learning_rate,
             verbose=self._verbose,
+            MargPost_loss=True,
         )
         
         self._trained_flows = trained_flows
@@ -684,116 +772,294 @@ class MMFLowEstimator(IMutualInformationPointEstimator):
         return self.estimate_with_info(x, y).mi_estimate
 
 
-########### Plotting Function ######################################################
+class FlowPostEstimator(IMutualInformationPointEstimator):
+    def __init__(
+        self,
+        batch_size: int =  _estimators._DEFAULT_BATCH_SIZE,
+        max_n_steps: int = _estimators._DEFAULT_N_STEPS,
+        train_test_split: Optional[float] = _estimators._DEFAULT_TRAIN_TEST_SPLIT,
+        test_every_n_steps: int = _estimators._DEFAULT_TEST_EVERY_N,
+        learning_rate: float = _estimators._DEFAULT_LEARNING_RATE,
+        flow_layers: int = 8,
+        nn_width: int = 50,
+        nn_depth: int = 1,
+        knots: int = 8,
+        interval: int = 4,
+        standardize: bool = _estimators._DEFAULT_STANDARDIZE,
+        verbose: bool = _estimators._DEFAULT_VERBOSE,
+        seed: int = _estimators._DEFAULT_SEED,
+    ) -> None:
+        self._params = FlowParams(
+            batch_size=batch_size,
+            max_n_steps=max_n_steps,
+            train_test_split=train_test_split,
+            test_every_n_steps=test_every_n_steps,
+            learning_rate=learning_rate,
+            standardize=standardize,
+            seed=seed,
+            flow_layers = flow_layers, 
+            nn_width = nn_width,
+            nn_depth = nn_depth,
+            knots = knots,
+            interval = interval)
+        
+        self._verbose = verbose
+        self._training_log: Optional[TrainingLog] = None
 
-def plot_final(
-    flows,
-    xs: BatchedPoints,
-    ys: BatchedPoints):
-    flows_vmap = jax.vmap(flows, in_axes=(0, 0))
-    fXs, logDetJfX, gYs, logDetJgY = flows_vmap(xs, ys)
-    fX_gYs = jnp.concatenate((fXs, gYs), axis=1)
-    Mu = jnp.mean(fX_gYs,axis=0)
-    Sigma = jnp.cov(fX_gYs.T)
+        # After the training we will store the trained
+        # critic function here
+        self._trained_flows = None
+
+    @property
+    def trained_flows(self) -> Optional[eqx.Module]:
+        """Returns the critic function from the end of the training.
+
+        Note:
+          1. You need to train the model by estimating mutual information,
+            otherwise `None` is returned.
+          2. Note that the critic can have different meaning depending on
+            the function used.
+        """
+        return self._trained_flows
+
+    def parameters(self) -> FlowParams:
+        return self._params
+
+    def _create_flows(self, dim_x: int, dim_y: int, key: jax.random.PRNGKeyArray) -> MaskedSplineFlows:#RealNVP:#
+        return MaskedSplineFlows(n_features_x = dim_x, 
+                                 n_features_y = dim_y, 
+                                 key=key, 
+                                 flow_layers = self._params.flow_layers, 
+                                 nn_width = self._params.nn_width,
+                                 nn_depth = self._params.nn_depth,
+                                 knots = self._params.knots,
+                                 interval = self._params.interval,)
     
-    n_sample, dim_x = xs.shape
-    XY = np.random.multivariate_normal(Mu,Sigma,10000)
-    flows_inv_vmap = jax.vmap(flows.inverse, in_axes=(0, 0))
-    fX, logDetJfX, gY, logDetJgY  = flows_inv_vmap(XY[:,:dim_x], XY[:,dim_x:])
+    def estimate_with_info(self, x: ArrayLike, y: ArrayLike) -> EstimateResult:
+        key = jax.random.PRNGKey(self._params.seed)
+        key_init, key_split, key_fit = jax.random.split(key, 3)
+
+        # standardize the data, note we do so before splitting into train/test
+        space = ProductSpace(x, y, standardize=self._params.standardize)
+        xs, ys = jnp.asarray(space.x), jnp.asarray(space.y)
+
+        # split
+        xs_train, xs_test, ys_train, ys_test = _estimators.train_test_split(
+            xs, ys, train_size=self._params.train_test_split, key=key_split
+        )
+
+        # initialize critic
+        _flows = self._create_flows(dim_x=space.dim_x, dim_y=space.dim_y, key=key_init)
+
+        training_log, trained_flows = Flow_training(
+            rng=key_fit,
+            flows = _flows,
+            xs=xs_train,
+            ys=ys_train,
+            xs_test=xs_test,
+            ys_test=ys_test,
+            batch_size=self._params.batch_size,
+            test_every_n_steps=self._params.test_every_n_steps,
+            max_n_steps=self._params.max_n_steps,
+            learning_rate=self._params.learning_rate,
+            verbose=self._verbose,
+            MargPost_loss= False,
+        )
+        
+        self._trained_flows = trained_flows
+
+        return EstimateResult(
+            mi_estimate=training_log.final_mi,
+            additional_information=training_log.additional_information)
+
+    def estimate(self, x: ArrayLike, y: ArrayLike) -> float:
+        return self.estimate_with_info(x, y).mi_estimate
+
+
+class MMParams(BaseModel):
+    train_test_split: Optional[pydantic.confloat(gt=0.0, lt=1.0)]
+    standardize: bool
+    seed: int
     
-    if dim_x == 1:
-        plt.scatter(fX, gY, s=10, c='black', alpha=0.5) 
-        # Add labels and title
-        plt.xlabel('X-axis label')
-        plt.ylabel('Y-axis label')
-        plt.title('Scatter Plot of X and Y')
-        # Show the plot
-        plt.show()
-        import scipy
-        xtest = np.linspace(-5,5,2000)
-        fxtest, logDetJfX, gYtest, logDetJgY = flows_vmap(xtest, xtest)
+class MargPostEstimator(IMutualInformationPointEstimator):
+    def __init__(
+        self,
+        train_test_split: Optional[float] = _estimators._DEFAULT_TRAIN_TEST_SPLIT,
+        standardize: bool = _estimators._DEFAULT_STANDARDIZE,
+        seed: int = _estimators._DEFAULT_SEED,
+    ) -> None:
+        self._params = MMParams(
+            train_test_split=train_test_split,
+            standardize=standardize,
+            seed=seed,)
+        
+        self._training_log: Optional[TrainingLog] = None
 
-        fmarg = scipy.stats.multivariate_normal.pdf(fxtest, Mu[:dim_x], Sigma[:dim_x,:dim_x])*np.exp(logDetJfX).T
-        gmarg = scipy.stats.multivariate_normal.pdf(gYtest, Mu[dim_x:], Sigma[dim_x:,dim_x:])*np.exp(logDetJgY).T
-        plt.plot(xtest, fmarg.flatten())
-        # Add labels and title
-        plt.xlabel('X-axis label')
-        plt.ylabel('p(x)-axis label')
-        plt.title('x marginal')
-        # Show the plot
-        plt.show()
+        # After the training we will store the trained
+        # critic function here
+        self._trained_flows = None
 
-        plt.plot(xtest, gmarg.flatten())
-        # Add labels and title
-        plt.xlabel('Y-axis label')
-        plt.ylabel('p(y)-axis label')
-        plt.title('y marginal')
-        # Show the plot
-        plt.show()
+    @property
+    def trained_flows(self) -> Optional[eqx.Module]:
+        """Returns the critic function from the end of the training.
+
+        Note:
+          1. You need to train the model by estimating mutual information,
+            otherwise `None` is returned.
+          2. Note that the critic can have different meaning depending on
+            the function used.
+        """
+        return self._trained_flows
+
+    def parameters(self) -> FlowParams:
+        return self._params
+    
+    def estimate_with_info(self, x: ArrayLike, y: ArrayLike) -> EstimateResult:
+        key = jax.random.PRNGKey(self._params.seed)
+        key_init, key_split, key_fit = jax.random.split(key, 3)
+
+        # standardize the data, note we do so before splitting into train/test
+        space = ProductSpace(x, y, standardize=self._params.standardize)
+        xs, ys = jnp.asarray(space.x), jnp.asarray(space.y)
+
+        # split
+        xs_train, xs_test, ys_train, ys_test = _estimators.train_test_split(
+            xs, ys, train_size=self._params.train_test_split, key=key_split
+        )
+
+        data = {}
+        data['x_train'] = xs_train
+        data['y_train'] = ys_train
+        data['x_test'] = xs_test
+        data['y_test'] = ys_test
+        
+        XY = np.concatenate((xs_train, ys_train), axis=1)
+        Sigma = np.cov(XY.T)
+        dim_x = xs_train.shape[1]
+        hX = 0.5 * np.linalg.slogdet(Sigma[:dim_x, :dim_x])[1] + dim_x / 2 * (1 + np.log(2 * np.pi))
+        hXY = 0.5 * np.linalg.slogdet(Sigma)[1] + (2*dim_x) / 2 * (1 + np.log(2 * np.pi))
+        hY = 0.5 * np.linalg.slogdet(Sigma[dim_x:, dim_x:])[1] + dim_x / 2 * (1 + np.log(2 * np.pi))
+        hX_Y = hXY-hY
+        value = hX - hX_Y 
+        
+        return EstimateResult(
+            mi_estimate=value,
+            additional_information=data)
+
+    def estimate(self, x: ArrayLike, y: ArrayLike) -> float:
+        return self.estimate_with_info(x, y).mi_estimate
+
+
+# ########### Plotting Function ######################################################
+
+# def plot_final(
+#     flows,
+#     xs: BatchedPoints,
+#     ys: BatchedPoints):
+#     flows_vmap = jax.vmap(flows, in_axes=(0, 0))
+#     fXs, logDetJfX, gYs, logDetJgY = flows_vmap(xs, ys)
+#     fX_gYs = jnp.concatenate((fXs, gYs), axis=1)
+#     Mu = jnp.mean(fX_gYs,axis=0)
+#     Sigma = jnp.cov(fX_gYs.T)
+    
+#     n_sample, dim_x = xs.shape
+#     XY = np.random.multivariate_normal(Mu,Sigma,10000)
+#     flows_inv_vmap = jax.vmap(flows.inverse, in_axes=(0, 0))
+#     fX, logDetJfX, gY, logDetJgY  = flows_inv_vmap(XY[:,:dim_x], XY[:,dim_x:])
+    
+#     if dim_x == 1:
+#         plt.scatter(fX, gY, s=10, c='black', alpha=0.5) 
+#         # Add labels and title
+#         plt.xlabel('X-axis label')
+#         plt.ylabel('Y-axis label')
+#         plt.title('Scatter Plot of X and Y')
+#         # Show the plot
+#         plt.show()
+#         import scipy
+#         xtest = np.linspace(-5,5,2000)
+#         fxtest, logDetJfX, gYtest, logDetJgY = flows_vmap(xtest, xtest)
+
+#         fmarg = scipy.stats.multivariate_normal.pdf(fxtest, Mu[:dim_x], Sigma[:dim_x,:dim_x])*np.exp(logDetJfX).T
+#         gmarg = scipy.stats.multivariate_normal.pdf(gYtest, Mu[dim_x:], Sigma[dim_x:,dim_x:])*np.exp(logDetJgY).T
+#         plt.plot(xtest, fmarg.flatten())
+#         # Add labels and title
+#         plt.xlabel('X-axis label')
+#         plt.ylabel('p(x)-axis label')
+#         plt.title('x marginal')
+#         # Show the plot
+#         plt.show()
+
+#         plt.plot(xtest, gmarg.flatten())
+#         # Add labels and title
+#         plt.xlabel('Y-axis label')
+#         plt.ylabel('p(y)-axis label')
+#         plt.title('y marginal')
+#         # Show the plot
+#         plt.show()
         
     
-    if dim_x == 2:
-        # xtest = (np.linspace(-4,4,100)*np.ones((2,100))).T
-        # actualX = xtest[:,0] + 0.4 * np.sin(1.0 * xtest[:,0]) + 0.2 * np.sin(1.7 * xtest[:,0] + 1) + 0.03 * np.sin(3.3 * xtest[:,0] - 2.5)
-        # actualY = xtest[:,0] - 0.4 * np.sin(0.4 * xtest[:,0]) + 0.17 * np.sin(1.3 * xtest[:,0] + 3.5) + 0.02 * np.sin(4.3 * xtest[:,0] - 2.5)
-        # fxtest, logDetJfX, gYtest, logDetJgY = flows_inv_vmap(xtest, xtest)
+#     if dim_x == 2:
+#         # xtest = (np.linspace(-4,4,100)*np.ones((2,100))).T
+#         # actualX = xtest[:,0] + 0.4 * np.sin(1.0 * xtest[:,0]) + 0.2 * np.sin(1.7 * xtest[:,0] + 1) + 0.03 * np.sin(3.3 * xtest[:,0] - 2.5)
+#         # actualY = xtest[:,0] - 0.4 * np.sin(0.4 * xtest[:,0]) + 0.17 * np.sin(1.3 * xtest[:,0] + 3.5) + 0.02 * np.sin(4.3 * xtest[:,0] - 2.5)
+#         # fxtest, logDetJfX, gYtest, logDetJgY = flows_inv_vmap(xtest, xtest)
         
-        # plt.plot(xtest[:,0], fxtest[:,0],label='fX0')
-        # plt.plot(xtest[:,1], fxtest[:,1],label='fX1')
-        # plt.plot(xtest[:,1], actualX,label='True Transform')
-        # plt.plot(xtest[:,1], -actualX,label='Negative True')
-        # # Add labels and title
-        # plt.xlabel('X-axis label')
-        # plt.ylabel('f(x)-axis label')
-        # plt.title('Learned X Flow')
-        # plt.legend()
-        # # Show the plot
-        # plt.show()
+#         # plt.plot(xtest[:,0], fxtest[:,0],label='fX0')
+#         # plt.plot(xtest[:,1], fxtest[:,1],label='fX1')
+#         # plt.plot(xtest[:,1], actualX,label='True Transform')
+#         # plt.plot(xtest[:,1], -actualX,label='Negative True')
+#         # # Add labels and title
+#         # plt.xlabel('X-axis label')
+#         # plt.ylabel('f(x)-axis label')
+#         # plt.title('Learned X Flow')
+#         # plt.legend()
+#         # # Show the plot
+#         # plt.show()
         
-        # plt.plot(xtest[:,0], gYtest[:,0],label='gY0')
-        # plt.plot(xtest[:,1], gYtest[:,1],label='gY1')
-        # plt.plot(xtest[:,1], actualY,label='True Transform')
-        # plt.plot(xtest[:,1], -actualY,label='Negative True')
-        # # Add labels and title
-        # plt.xlabel('Y-axis label')
-        # plt.ylabel('g(y)-axis label')
-        # plt.title('Learned Y Flow')
-        # plt.legend()
-        # # Show the plot
-        # plt.show()
-        # fX[:,0][:,0], fX[:,0]  #fX[:,0][:,1], fX[:,1]
-        plt.scatter(fX[:,0], fX[:,1], s=10, c='black', alpha=0.5)
-        # Add labels and title
-        plt.xlabel('X0-axis label')
-        plt.ylabel('X1-axis label')
-        plt.title('Scatter Plot of X and Y')
+#         # plt.plot(xtest[:,0], gYtest[:,0],label='gY0')
+#         # plt.plot(xtest[:,1], gYtest[:,1],label='gY1')
+#         # plt.plot(xtest[:,1], actualY,label='True Transform')
+#         # plt.plot(xtest[:,1], -actualY,label='Negative True')
+#         # # Add labels and title
+#         # plt.xlabel('Y-axis label')
+#         # plt.ylabel('g(y)-axis label')
+#         # plt.title('Learned Y Flow')
+#         # plt.legend()
+#         # # Show the plot
+#         # plt.show()
+#         # fX[:,0][:,0], fX[:,0]  #fX[:,0][:,1], fX[:,1]
+#         plt.scatter(fX[:,0], fX[:,1], s=10, c='black', alpha=0.5)
+#         # Add labels and title
+#         plt.xlabel('X0-axis label')
+#         plt.ylabel('X1-axis label')
+#         plt.title('Scatter Plot of X and Y')
 
-        # Show the plot
-        plt.show()
-        #fX[:,0][:,0], fX[:,0] 
-        plt.scatter(fX[:,0], gY[:,0], s=10, c='black', alpha=0.5)
-        # Add labels and title
-        plt.xlabel('X0-axis label')
-        plt.ylabel('Y0-axis label')
-        plt.title('Scatter Plot of X and Y')
+#         # Show the plot
+#         plt.show()
+#         #fX[:,0][:,0], fX[:,0] 
+#         plt.scatter(fX[:,0], gY[:,0], s=10, c='black', alpha=0.5)
+#         # Add labels and title
+#         plt.xlabel('X0-axis label')
+#         plt.ylabel('Y0-axis label')
+#         plt.title('Scatter Plot of X and Y')
 
-        # Show the plot
-        plt.show()
-        #fX[:,0][:,1], fX[:,1]
-        plt.scatter(fX[:,1], gY[:,1], s=10, c='black', alpha=0.5)
-        # Add labels and title
-        plt.xlabel('X1-axis label')
-        plt.ylabel('Y1-axis label')
-        plt.title('Scatter Plot of X and Y')
+#         # Show the plot
+#         plt.show()
+#         #fX[:,0][:,1], fX[:,1]
+#         plt.scatter(fX[:,1], gY[:,1], s=10, c='black', alpha=0.5)
+#         # Add labels and title
+#         plt.xlabel('X1-axis label')
+#         plt.ylabel('Y1-axis label')
+#         plt.title('Scatter Plot of X and Y')
 
-        # Show the plot
-        plt.show()
+#         # Show the plot
+#         plt.show()
         
-        plt.scatter(gY[:,0], gY[:,1], s=10, c='black', alpha=0.5)
-        # Add labels and title
-        plt.xlabel('Y0-axis label')
-        plt.ylabel('Y1-axis label')
-        plt.title('Scatter Plot of X and Y')
+#         plt.scatter(gY[:,0], gY[:,1], s=10, c='black', alpha=0.5)
+#         # Add labels and title
+#         plt.xlabel('Y0-axis label')
+#         plt.ylabel('Y1-axis label')
+#         plt.title('Scatter Plot of X and Y')
 
-        # Show the plot
-        plt.show()    
+#         # Show the plot
+#         plt.show()    
