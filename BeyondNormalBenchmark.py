@@ -6,7 +6,6 @@ from joblib import Parallel, delayed
 import time
 import os
 import pickle
-
 TASKS = ['1v1-normal-0.75',                             #0
 'normal_cdf-1v1-normal-0.75',                           #1
 '1v1-additive-0.1',                                     #2
@@ -44,7 +43,59 @@ TASKS = ['1v1-normal-0.75',                             #0
 'asinh-student-identity-2-2-1',                         #34
 'asinh-student-identity-3-3-2',                         #35
 'asinh-student-identity-5-5-2']                         #36
+Trans1D1 = ['1v1-normal-0.75',                             #0
+'normal_cdf-1v1-normal-0.75',                           #1
+'1v1-additive-0.1',                                     #2
+'1v1-additive-0.75',                                    #3
+'1v1-bimodal-0.75',                                     #4
+'wiggly-1v1-normal-0.75',                               #5
+'half_cube-1v1-normal-0.75',                            #6
+'student-identity-1-1-1',                               #7
+'asinh-student-identity-1-1-1',                         #8
+'swissroll_x-normal_cdf-1v1-normal-0.75',               #9
+] #30min * 10 task *10 runs (parallel 100)
 
+DenseNorm2 = ['multinormal-dense-2-2-0.5',                  #10
+'multinormal-dense-3-3-0.5',                            #11
+'multinormal-dense-5-5-0.5',                            #12
+'multinormal-dense-25-25-0.5',                          #13
+] #(25,25,50,100) min 4 task * 10 runs (parallel 40)
+LargeNorm3 = ['multinormal-dense-50-50-0.5',                #14
+] #150 min 1 task * 10 runs (parallel 10)
+SparseNorm4 = [
+'multinormal-sparse-2-2-2-2.0',                         #15
+'multinormal-sparse-3-3-2-2.0',                         #16
+'multinormal-sparse-5-5-2-2.0',                         #17
+] #(25,25,50) min 3 task * 10 runs (parallel 30)
+StudentT5 = [
+'student-identity-2-2-1',                               #18
+'student-identity-2-2-2',                               #19
+'student-identity-3-3-2',                               #20
+'student-identity-3-3-3',                               #21
+'student-identity-5-5-2',                               #22
+'student-identity-5-5-3',                               #23
+] #(25,25,25,25,50,50) min 6 task 10 run (parallel 60)
+SparseUnif6 = [
+'normal_cdf-multinormal-sparse-3-3-2-2.0',              #24
+'normal_cdf-multinormal-sparse-5-5-2-2.0',              #25
+'normal_cdf-multinormal-sparse-25-25-2-2.0',            #26
+] #(25,50,120) min 3 task 10 run (parallel 30)
+TransNorm7 = [
+'spiral-multinormal-sparse-3-3-2-2.0',                  #28
+'spiral-multinormal-sparse-5-5-2-2.0',                  #29
+'spiral-multinormal-sparse-25-25-2-2.0',                #30
+] #(25,50,120) min 3 task 10 run (parallel 30)
+SpiralUnif8 = [
+'spiral-normal_cdf-multinormal-sparse-3-3-2-2.0',       #31
+'spiral-normal_cdf-multinormal-sparse-5-5-2-2.0',       #32
+'spiral-normal_cdf-multinormal-sparse-25-25-2-2.0',     #33
+] #(25,50,120) min 3 task 10 run (parallel 30)
+AsinhST9 = [
+'half_cube-multinormal-sparse-25-25-2-2.0',             #27
+'asinh-student-identity-2-2-1',                         #34
+'asinh-student-identity-3-3-2',                         #35
+'asinh-student-identity-5-5-2'                          #36
+]#(120,25,25,50) min 4 task 10 run (parallel 40)
 def evaluate_parallel_run(i,
                         seed,
                         task,
@@ -61,32 +112,32 @@ def evaluate_parallel_run(i,
     if 'FlowMP' in method_names:
         MMFlow = FlowMargPostEstimator(batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)#max_n_steps=int(100*(i+1))
         MMFLowResults = MMFlow.estimate_with_info(X,Y)
-        run['FlowMP'] = np.array(MMFLowResults.additional_information['test_history'])[-1,1]
+        run['FlowMP'] = MMFLowResults#np.array(MMFLowResults.additional_information['test_history'])[-1,1]
     
     if 'MPGauss' in method_names:
         MPGauss = MargPostEstimator(train_test_split=train_test_split)
         MPGaussResults = MPGauss.estimate_with_info(X,Y)
-        run['MPGauss']= MPGaussResults.mi_estimate
+        run['MPGauss']= MPGaussResults#MPGaussResults.mi_estimate
     
     if 'MINE' in method_names:
         mine = bmi.estimators.MINEEstimator(batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
         mineResults = mine.estimate_with_info(X,Y)
-        run['MINE'] = mineResults.mi_estimate
+        run['MINE'] = mineResults #mineResults.mi_estimate
     
     if 'InfoNCE' in method_names:
         InfoNCE = bmi.estimators.InfoNCEEstimator(batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
         InfoNCEResults = InfoNCE.estimate_with_info(X,Y)
-        run['InfoNCE'] = InfoNCEResults.mi_estimate
+        run['InfoNCE'] = InfoNCEResults#InfoNCEResults.mi_estimate
     
     if 'NWJ' in method_names:
         NWJ = bmi.estimators.NWJEstimator(batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
         NWJResults = NWJ.estimate_with_info(X,Y)
-        run['NWJ'] = NWJResults.mi_estimate
+        run['NWJ'] = NWJResults#NWJResults.mi_estimate
     
     if 'DV' in method_names:
         DV = bmi.estimators.DonskerVaradhanEstimator(batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
         DVResults = DV.estimate_with_info(X,Y)
-        run['DV'] = DVResults.mi_estimate
+        run['DV'] = DVResults#DVResults.mi_estimate
         
     if 'CCA' in method_names:
         cca = bmi.estimators.CCAMutualInformationEstimator()
@@ -180,7 +231,8 @@ def main(experiment_name,
     experiments['task_data'] = task_data
     # Pickle the results
     t = time.localtime()
-    run_id = time.strftime("%Y%m%d%H%M%S", t)
+    # run_id = time.strftime("%Y%m%d%H%M%S", t)
+    run_id = experiment_name
     path_to_artifact = "./experiment_outputs/BMI/{}".format(run_id)
     if not os.path.exists("./experiment_outputs/BMI"):
         os.makedirs("./experiment_outputs/BMI")
@@ -201,10 +253,10 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--device", default="cpu", type=str)#"cuda"
-
-    parser.add_argument("--task_list", default=TASKS, type=int)
     
-    parser.add_argument("--num-runs", default=10, type=int)
+    parser.add_argument("--task_list", default=Trans1D1, type=int)#TASKS
+    
+    parser.add_argument("--num-runs", default=10, type=int)#10
     
     parser.add_argument("--num-samples", default=10000, type=int)
     parser.add_argument("--train_test_split", default=.8, type=float)

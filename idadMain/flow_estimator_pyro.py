@@ -115,7 +115,7 @@ class IdentityTransform(nn.Module):
         return z
     
 class SplineFlow(LazyNN):
-    def __init__(self, dim_input, count_bins=8, bounds=3,device = 'cpu'): #'cuda'
+    def __init__(self, dim_input, count_bins=8, bounds=4,device = 'cuda'): #'cpu'
         super().__init__(dim_input)
         
         self.dim_input = dim_input
@@ -125,7 +125,7 @@ class SplineFlow(LazyNN):
         if dim_input == 0:
             self.spline_transform = T.Spline(dim_input, count_bins=count_bins, bound=bounds)
         else:
-            self.spline_transform = spline_autoregressive1(dim_input,n_flows=2,hidden_dims=[32, 32], count_bins=count_bins, bound=bounds, order='quadratic')
+            self.spline_transform = spline_autoregressive1(dim_input,n_flows=2,hidden_dims=[50], count_bins=count_bins, bound=bounds, order='quadratic')
 
     def forward(self, x):
         z = self.spline_transform(x)
@@ -137,7 +137,7 @@ class SplineFlow(LazyNN):
         # logDet = self.spline_transform.log_abs_det_jacobian(z, x)
         return x#, logDet
 
-def spline_autoregressive1(input_dim, n_flows = 8, hidden_dims=None, count_bins=8, bound=3.0, order='linear'):
+def spline_autoregressive1(input_dim, n_flows = 2, hidden_dims=None, count_bins=8, bound=3.0, order='linear'):
     r"""
     A helper function to create an
     :class:`~pyro.distributions.transforms.SplineAutoregressive` object that takes
@@ -176,7 +176,7 @@ def spline_autoregressive1(input_dim, n_flows = 8, hidden_dims=None, count_bins=
         nfs.append(T.Permute(torch.arange(input_dim, dtype=torch.long).flip(0)))
         nfs.append(T.SplineAutoregressive(input_dim, arns[i], count_bins=count_bins, bound=bound, order=order))
 
-    return T.ComposeTransform(nfs,cache_size=0)
+    return T.ComposeTransformModule(nfs,cache_size=0)#T.ComposeTransform(nfs,cache_size=0)
 
 ##############################################################################################
 ##############################################################################################
@@ -260,7 +260,7 @@ class VariationalMutualInformationOptimizer(object):
         return (latents, *zip(designs, observations))
 
 class MomentMatchMarginalPosterior(VariationalMutualInformationOptimizer):
-    def __init__(self, model, batch_size, flow_x, flow_y,device, **kwargs):
+    def __init__(self, model, batch_size, flow_x, flow_y,train_flow,device, **kwargs):
         super().__init__(
             model=model, batch_size=batch_size
         )
@@ -270,27 +270,39 @@ class MomentMatchMarginalPosterior(VariationalMutualInformationOptimizer):
         self.hX_Y = 0
         self.fX = flow_x
         self.gY = flow_y
+        self.train_flow = train_flow
         self.pi_const = 2*torch.acos(torch.zeros(1)).to(device)
         self.e_const = torch.exp(torch.tensor([1])).to(device)
 
     def differentiable_loss(self, *args, **kwargs):
+        if self.train_flow:
+            if hasattr(self.fX, "parameters"):
+                #! this is required for the pyro optimizer
+                pyro.module("flow_x_net", self.fX)
+            if hasattr(self.gY, "parameters"):
+                #! this is required for the pyro optimizer
+                pyro.module("flow_y_net", self.gY)
         # sample from design
         latents, *history = self._get_data(args, kwargs)
         
         dim_lat = latents.shape[1]
         dim_obs = history[0][1].shape[1]
         
-        if hasattr(self.fX, "parameters"):
-            #! this is required for the pyro optimizer
-            pyro.module("flow_x_net", self.fX)
-        if hasattr(self.gY, "parameters"):
-            #! this is required for the pyro optimizer
-            pyro.module("flow_y_net", self.gY)
+        # # if self.train_flow:
+        # if hasattr(self.fX, "parameters"):
+        #     #! this is required for the pyro optimizer
+        #     pyro.module("flow_x_net", self.fX)
+        # if hasattr(self.gY, "parameters"):
+        #     #! this is required for the pyro optimizer
+        #     pyro.module("flow_y_net", self.gY)
         
         mufX, logDetJfX = self.fX.forward(latents)
         mugY, logDetJgY = self.gY.forward(history[0][1])
-        
-        #compute loss
+        # with torch.no_grad():
+        #     mufX1, logDetJfX1 = self.fX.forward(torch.ones(dim_lat))
+        #     print(mufX1)
+        #     print(logDetJfX1)
+        # compute loss
         data = torch.cat([mufX,mugY],axis=1)
         
         Sigma = cov(data)+1e-4*torch.eye(dim_lat+dim_obs).to(latents.device)
@@ -315,3 +327,69 @@ class MomentMatchMarginalPosterior(VariationalMutualInformationOptimizer):
 
 ##############################################################################################
 ##############################################################################################
+
+class MomentMatchPosterior(VariationalMutualInformationOptimizer):
+    def __init__(self, model, batch_size, flow_x, flow_y,train_flow,device, **kwargs):
+        super().__init__(
+            model=model, batch_size=batch_size
+        )
+        self.mu = 0
+        self.Sigma = 0
+        self.hX = 0
+        self.hX_Y = 0
+        self.fX = flow_x
+        self.gY = flow_y
+        self.train_flow = train_flow
+        self.pi_const = 2*torch.acos(torch.zeros(1)).to(device)
+        self.e_const = torch.exp(torch.tensor([1])).to(device)
+
+    def differentiable_loss(self, *args, **kwargs):
+        if self.train_flow:
+            if hasattr(self.fX, "parameters"):
+                #! this is required for the pyro optimizer
+                pyro.module("flow_x_net", self.fX)
+            if hasattr(self.gY, "parameters"):
+                #! this is required for the pyro optimizer
+                pyro.module("flow_y_net", self.gY)
+        # sample from design
+        latents, *history = self._get_data(args, kwargs)
+        
+        dim_lat = latents.shape[1]
+        dim_obs = history[0][1].shape[1]
+        
+        # # if self.train_flow:
+        # if hasattr(self.fX, "parameters"):
+        #     #! this is required for the pyro optimizer
+        #     pyro.module("flow_x_net", self.fX)
+        # if hasattr(self.gY, "parameters"):
+        #     #! this is required for the pyro optimizer
+        #     pyro.module("flow_y_net", self.gY)
+        
+        mufX, logDetJfX = self.fX.forward(latents)
+        mugY, logDetJgY = self.gY.forward(history[0][1])
+        # with torch.no_grad():
+        #     mufX1, logDetJfX1 = self.fX.forward(torch.ones(dim_lat))
+        #     print(mufX1)
+        #     print(logDetJfX1)
+        # compute loss
+        data = torch.cat([mufX,mugY],axis=1)
+        
+        Sigma = cov(data)+1e-4*torch.eye(dim_lat+dim_obs).to(latents.device)
+        self.hX = .5*torch.log(torch.linalg.det(Sigma[:dim_lat,:dim_lat]))+(dim_lat/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)
+        hY = .5*torch.log(torch.linalg.det(Sigma[dim_lat:,dim_lat:]))+(dim_obs/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY)
+        hXY = .5*torch.log(torch.linalg.det(Sigma))+((dim_lat+dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)-torch.mean(logDetJgY)
+        self.hX_Y = hXY-hY
+        hY_X = hXY-self.hX
+        
+        # save optimal parameters for decision
+        self.mu = torch.mean(data,axis=0)
+        self.Sigma = Sigma
+        return self.hX+self.hX_Y+hY_X+hY-torch.detach(2*self.hX_Y+hY_X+hY)
+
+    def loss(self, *args, **kwargs):
+        """
+        :returns: returns an estimate of the mutual information
+        :rtype: float
+        Evaluates the MI lower bound using the BA lower bound == -EIG
+        """
+        return self.hX-self.hX_Y

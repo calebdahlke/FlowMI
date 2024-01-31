@@ -286,7 +286,7 @@ if __name__ == "__main__":
         "--num-histories", help="Number of histories/rollouts", default=1, type=int#128
     )
     parser.add_argument("--num-experiments", default=10, type=int)  # == T
-    parser.add_argument("--batch-size", default=1024, type=int)
+    parser.add_argument("--batch-size", default=256, type=int)#1024
     parser.add_argument("--device", default="cpu", type=str)#"cuda"
     parser.add_argument(
         "--mlflow-experiment-name", default="locfin_variational", type=str

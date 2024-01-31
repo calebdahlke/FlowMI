@@ -1,7 +1,7 @@
 import os
 import pickle
 import argparse
-
+import time
 import torch
 from torch import nn
 # from pyro.infer.util import torch_item
@@ -45,6 +45,8 @@ def optimise_design(
     posterior_cov,
     flow_theta,
     flow_obs,
+    train_flow,
+    run_flow,
     experiment_number,
     noise_scale,
     p,
@@ -76,11 +78,7 @@ def optimise_design(
         noise_scale=noise_scale * torch.ones(1, device=device),
     )
     
-    hidden = 64#None#
-    if hidden == None:
-        fX = IdentityTransform()
-        gY = IdentityTransform()
-    else:
+    if run_flow:
         dim_x = num_sources*p
         dim_y = 1
         if flow_theta == None:
@@ -93,6 +91,10 @@ def optimise_design(
             # gY = RealNVP(dim_y, num_blocks=3, dim_hidden=hidden//2,device=device).to(device)
         else:
             gY = copy.deepcopy(flow_obs)
+    else:
+        fX = IdentityTransform()
+        gY = IdentityTransform()
+
 
     ### Set-up loss ###
     mi_loss_instance = MomentMatchMarginalPosterior(
@@ -100,6 +102,7 @@ def optimise_design(
         batch_size=batch_size,
         flow_x=fX,
         flow_y=gY,
+        train_flow=train_flow,
         device=device
     )
     
@@ -143,6 +146,8 @@ def main_loop(
     mlflow_run_id,
     device,
     T,
+    train_flow_every_step,
+    run_flow,
     noise_scale,
     num_sources,
     p,
@@ -152,16 +157,23 @@ def main_loop(
     annealing_scheme,
 ):
     pyro.clear_param_store()
-
     theta_loc = torch.zeros((1, num_sources*p), device=device)
     theta_covmat = torch.eye(num_sources*p, device=device)
     flow_theta = None
     flow_obs = None
+    train_flow = True
     prior = torch.distributions.MultivariateNormal(theta_loc, theta_covmat)
 
     # sample true param
     true_theta = prior.sample(torch.Size([1]))
-
+    time_per_design = []
+    # flow_dist_so_far = []
+    mus_so_far = []
+    sigmas_so_far = []
+    flow_theta_so_far = []
+    flow_obs_so_far = []
+    posterior_loc_so_far = []
+    posterior_cov_so_far = []
     designs_so_far = []
     observations_so_far = []
 
@@ -170,6 +182,7 @@ def main_loop(
     posterior_cov = torch.eye(p * num_sources, device=device)
 
     for t in range(0, T):
+        t_start = time.time()
         print(f"Step {t + 1}/{T} of Run {run + 1}")
         pyro.clear_param_store()
         ho_model, mi_loss_instance = optimise_design(
@@ -177,6 +190,8 @@ def main_loop(
             posterior_cov,
             flow_theta,
             flow_obs,
+            train_flow=train_flow,
+            run_flow=run_flow,
             experiment_number=t,
             noise_scale=noise_scale,
             p=p,
@@ -211,9 +226,22 @@ def main_loop(
             posterior_cov = Sigmaxx-torch.matmul(Sigmaxy,torch.linalg.solve(Sigmayy,Sigmaxy.T))
             flow_theta = mi_loss_instance.fX
             flow_obs = mi_loss_instance.gY
+        t_end = time.time()
+        run_time = t_end-t_start
+
         
+        mus_so_far.append(mi_loss_instance.mu.detach().clone().numpy())
+        sigmas_so_far.append(mi_loss_instance.Sigma.detach().clone().numpy())
+        flow_theta_so_far.append(copy.deepcopy(mi_loss_instance.fX))
+        flow_obs_so_far.append(copy.deepcopy(mi_loss_instance.gY))
+
+        posterior_loc_so_far.append(posterior_loc.numpy())
+        posterior_cov_so_far.append(posterior_cov.numpy())
+        time_per_design.append(run_time)
         designs_so_far.append(design[0])
         observations_so_far.append(observation[0])
+        if not train_flow_every_step:
+            train_flow = False
 
     print(f"Fitted posterior: mean = {posterior_loc}, cov = {posterior_cov}")
     print("True theta = ", true_theta.reshape(-1))
@@ -224,8 +252,19 @@ def main_loop(
     for i, y in enumerate(observations_so_far):
         data_dict[f"y{i + 1}"] = y.cpu()
     data_dict["theta"] = true_theta.reshape((num_sources, p)).cpu()
+    
+    extra_data = {}
+    extra_data["mu"] = mus_so_far
+    extra_data["sigmas"] = sigmas_so_far
+    extra_data["flow_theta"] = flow_theta_so_far
+    extra_data["flow_obs"] = flow_obs_so_far
+    extra_data["posterior_loc"] = posterior_loc_so_far
+    extra_data["posterior_cov"] = posterior_cov_so_far
+    extra_data["design_time"] = time_per_design
+    extra_data["designs"] = designs_so_far
+    extra_data["observations"] = observations_so_far
 
-    return data_dict
+    return data_dict, extra_data
 
 
 def main(
@@ -234,6 +273,8 @@ def main(
     num_histories,
     device,
     T,
+    train_flow_every_step,
+    run_flow,
     p,
     num_sources,
     noise_scale,
@@ -265,13 +306,27 @@ def main(
         "noise_scale": noise_scale,
         "num_histories": num_histories,
     }
+    extra_meta = {
+        "model": "location_finding",
+        "p": p,
+        "K": num_sources,
+        "noise_scale": noise_scale,
+        "num_histories": num_histories,
+        "train_flow_every_step": train_flow_every_step,
+        "run_flow": run_flow,
+        "seed": seed
+    }
+
     results_vi = {"loop": [], "seed": seed, "meta": meta}
+    extra_vi = {"loop":[],"meta":extra_meta}
     for i in range(num_histories):
-        results = main_loop(
+        results, extra_data = main_loop(
             run=i,
             mlflow_run_id=mlflow.active_run().info.run_id,
             device=device,
             T=T,
+            train_flow_every_step=train_flow_every_step,
+            run_flow=run_flow,
             noise_scale=noise_scale,
             num_sources=num_sources,
             p=p,
@@ -281,6 +336,7 @@ def main(
             annealing_scheme=annealing_scheme,
         )
         results_vi["loop"].append(results)
+        extra_vi["loop"].append(extra_data)
 
     # Log the results dict as an artifact
     if not os.path.exists("./mlflow_outputs"):
@@ -294,6 +350,14 @@ def main(
         ml_info.experiment_id, ml_info.run_id
     )
     print("Path to artifact - use this when evaluating:\n", path_to_artifact)
+    
+    t = time.localtime()
+    run_id = time.strftime("%Y%m%d%H%M%S", t)
+    path_to_artifact = "./experiment_outputs/loc_fin/{}".format(run_id)
+    if not os.path.exists("./experiment_outputs/loc_fin"):
+        os.makedirs("./experiment_outputs/loc_fin")
+    with open(path_to_artifact, "wb") as f:
+        pickle.dump(extra_vi, f)
     # --------------------------------------------------------------------------
 
 
@@ -306,14 +370,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-histories", help="Number of histories/rollouts", default=2, type=int#128
     )
-    parser.add_argument("--num-experiments", default=2, type=int)  # 10
-    parser.add_argument("--batch-size", default=1024, type=int)#512
+    parser.add_argument("--num-experiments", default=10, type=int)  # 10
+    parser.add_argument("--batch-size", default=256, type=int)#512,1024
     parser.add_argument("--device", default="cpu", type=str)#"cuda"
     parser.add_argument(
         "--mlflow-experiment-name", default="locfin_mm_variational", type=str
     )
     parser.add_argument("--lr", default=0.005, type=float)#0.005
-    parser.add_argument("--num-steps", default=500, type=int)#5000
+    parser.add_argument("--num-steps", default=5000, type=int)#
+    parser.add_argument("--train-flow-every-step", default=False, type=bool)
+    parser.add_argument("--run-flow", default=True, type=bool)
     
     args = parser.parse_args()
 
@@ -323,6 +389,8 @@ if __name__ == "__main__":
         num_histories=args.num_histories,
         device=args.device,
         T=args.num_experiments,
+        train_flow_every_step= args.train_flow_every_step,
+        run_flow = args.run_flow,
         p=args.physical_dim,
         num_sources=2,
         noise_scale=0.5,
@@ -330,457 +398,4 @@ if __name__ == "__main__":
         num_steps=args.num_steps,
         lr=args.lr,
     )
-    
-    
-##############################################################################################
-################################# Alternative Hidden Model ###################################
-##############################################################################################
-# from oed.primitives import observation_sample, latent_sample, compute_design
-# import pandas as pd
-# class HiddenObjects2(nn.Module):
-#     """Location finding example"""
-
-#     def __init__(
-#         self,
-#         design_net,
-#         base_signal=0.1,  # G-map hyperparam
-#         max_signal=1e-4,  # G-map hyperparam
-#         theta_loc=None,  # prior on theta mean hyperparam
-#         theta_covmat=None,  # prior on theta covariance hyperparam
-#         flow_theta = None,
-#         noise_scale=None,  # this is the scale of the noise term
-#         p=1,  # physical dimension
-#         K=1,  # number of sources
-#         T=2,  # number of experiments
-#     ):
-#         super().__init__()
-#         self.design_net = design_net
-#         self.base_signal = base_signal
-#         self.max_signal = max_signal
-#         # Set prior:
-#         self.theta_loc = theta_loc if theta_loc is not None else torch.zeros(K*p)
-#         self.theta_covmat = theta_covmat if theta_covmat is not None else torch.eye(K*p)
-#         self.flow_theta = flow_theta if flow_theta is not None else IdentityTransform() #reverse
-#         self.theta_prior = dist.MultivariateNormal(
-#             self.theta_loc, self.theta_covmat
-#         )
-#         # Observations noise scale:
-#         self.noise_scale = noise_scale if noise_scale is not None else torch.tensor(1.0)
-#         self.n = 1  # samples per design=1
-#         self.p = p  # dimension of theta (location finding example will be 1, 2 or 3).
-#         self.K = K  # number of sources
-#         self.T = T  # number of experiments
-
-#     def forward_map(self, xi, theta):
-#         """Defines the forward map for the hidden object example
-#         y = G(xi, theta) + Noise.
-#         """
-#         # two norm squared
-#         sq_two_norm = (xi - theta).pow(2).sum(axis=-1)
-#         # add a small number before taking inverse (determines max signal)
-#         sq_two_norm_inverse = (self.max_signal + sq_two_norm).pow(-1)
-#         # sum over the K sources, add base signal and take log.
-#         mean_y = torch.log(self.base_signal + sq_two_norm_inverse.sum(-1, keepdim=True))
-#         return mean_y
-
-#     def model(self):
-#         if hasattr(self.design_net, "parameters"):
-#             #! this is required for the pyro optimizer
-#             pyro.module("design_net", self.design_net)
-
-#         ########################################################################
-#         # Sample latent variables theta
-#         ########################################################################
-#         theta = latent_sample("theta", self.theta_prior)
-#         with torch.no_grad():
-#             theta = self.flow_theta.reverse(theta)#.flatten(-1)
-#         theta = theta.reshape((len(theta),self.K,self.p))
-#         y_outcomes = []
-#         xi_designs = []
-
-#         # T-steps experiment
-#         for t in range(self.T):
-#             ####################################################################
-#             # Get a design xi; shape is [batch size x self.n x self.p]
-#             ####################################################################
-#             xi = compute_design(
-#                 f"xi{t + 1}", self.design_net.lazy(*zip(xi_designs, y_outcomes))
-#             )
-#             ####################################################################
-#             # Sample y at xi; shape is [batch size x 1]
-#             ####################################################################
-#             mean = self.forward_map(xi, theta)
-#             sd = self.noise_scale
-#             y = observation_sample(f"y{t + 1}", dist.Normal(mean, sd).to_event(1))
-
-#             ####################################################################
-#             # Update history
-#             ####################################################################
-#             y_outcomes.append(y)
-#             xi_designs.append(xi)
-
-#         return theta, xi_designs, y_outcomes
-
-#     def forward(self, theta):
-#         """Run the policy for a given theta"""
-#         self.design_net.eval()
-
-#         def conditioned_model():
-#             with pyro.plate_stack("expand_theta_test", [theta.shape[0]]):
-#                 # condition on theta
-#                 return pyro.condition(self.model, data={"theta": theta})()
-
-#         with torch.no_grad():
-#             theta, designs, observations = conditioned_model()
-#         self.design_net.train()
-#         return designs, observations
-
-#     def eval(self, n_trace=3, theta=None, verbose=True):
-#         """run the policy, print output and return it in a dataframe"""
-#         self.design_net.eval()
-
-#         if theta is None:
-#             theta = self.theta_prior.sample(torch.Size([n_trace]))
-#             # theta = self.flow_theta.reverse(theta)
-#         else:
-#             theta = theta.unsqueeze(0).expand(n_trace, *theta.shape)
-#             # dims: [n_trace * number of thetas given, shape of theta]
-#             theta = theta.reshape(-1, *theta.shape[2:])
-
-#         designs, observations = self.forward(theta)
-#         output = []
-#         true_thetas = []
-
-#         for i in range(n_trace):
-#             if verbose:
-#                 print("\nExample run {}".format(i + 1))
-#                 print(f"*True Theta: {theta[i].cpu()}*")
-#             run_xis = []
-#             run_ys = []
-#             # Print optimal designs, observations for given theta
-#             for t in range(self.T):
-#                 xi = designs[t][i].detach().cpu().reshape(-1)
-#                 run_xis.append(xi)
-#                 y = observations[t][i].detach().cpu().item()
-#                 run_ys.append(y)
-#                 if verbose:
-#                     print(f"xi{t + 1}: {xi},   y{t + 1}: {y}")
-#             run_df = pd.DataFrame(torch.stack(run_xis).numpy())
-#             run_df.columns = [f"xi_{i}" for i in range(self.p)]
-#             run_df["observations"] = run_ys
-#             run_df["order"] = list(range(1, self.T + 1))
-#             run_df["run_id"] = i + 1
-#             output.append(run_df)
-
-#         self.design_net.train()
-#         return pd.concat(output), theta.cpu().numpy()
-# ##############################################################################################
-# ##############################################################################################
-
-# ##############################################################################################
-# ######################################### Flows ##############################################
-# ##############################################################################################
-# from neural.modules import LazyDelta
-# class LazyNN(nn.Module):
-#     def __init__(self, design_dim):
-#         super().__init__()
-#         self.register_buffer("prototype", torch.zeros(design_dim))
-
-#     def lazy(self, x):
-#         def delayed_function():
-#             return self.forward(x)
-
-#         lazy_delta = LazyDelta(
-#             delayed_function, self.prototype, event_dim=self.prototype.dim()
-#         )
-#         return lazy_delta
-
-# class RealNVP(LazyNN):
-#     def __init__(self, dim_input, num_blocks=5, dim_hidden=256,device = 'cpu'): #'cuda'
-#         super().__init__(dim_input)
-        
-#         self.dim_input = dim_input
-#         self.num_blocks = num_blocks
-#         self.dim_hidden = dim_hidden
-
-#         self.scale_net = nn.ModuleList([self._scale_block() for _ in range(num_blocks)])
-#         self.translation_net = nn.ModuleList([self._translation_block() for _ in range(num_blocks)])
-#         mask = torch.ones(dim_input).to(device)
-#         mask[int(dim_input / 2):] = 0
-#         mask.requires_grad = False
-#         self.mask = mask
-
-#     def _scale_block(self):
-#         return nn.Sequential(
-#             nn.Linear(self.dim_input, self.dim_hidden),#
-#             nn.ReLU(),
-#             nn.Linear(self.dim_hidden, self.dim_hidden),
-#             nn.ReLU(),
-#             nn.Linear(self.dim_hidden, self.dim_input),#
-#             nn.Tanh()
-#         )
-
-#     def _translation_block(self):
-#         return nn.Sequential(
-#             nn.Linear(self.dim_input, self.dim_hidden),# 
-#             nn.ReLU(),
-#             nn.Linear(self.dim_hidden, self.dim_hidden),
-#             nn.ReLU(),
-#             nn.Linear(self.dim_hidden, self.dim_input)# 
-#         )
-
-#     def forward(self, x):
-#         log_det_J = torch.zeros(x.size(0), device=x.device)
-
-#         for i in range(self.num_blocks):
-#             if i%2==0:
-#                 maski = 1- self.mask
-#             else:
-#                 maski = self.mask
-
-#             s = maski * self.scale_net[i](x * (1 - maski))
-#             s = torch.tanh(s)#torch.tanh()
-#             t = maski * self.translation_net[i](x * (1 - maski))
-
-#             x = x*torch.exp(s) + t
-
-#             log_det_J += torch.sum(s, dim=1)
-
-#         return x, log_det_J
-
-#     def reverse(self, z):
-#         # log_det_J = torch.zeros(z.size(0), device=z.device)
-#         for i in reversed(range(self.num_blocks)):
-#             if i%2==0:
-#                 maski = 1- self.mask
-#             else:
-#                 maski = self.mask
-
-#             s = maski * self.scale_net[i](z * (1 - maski))
-#             s = torch.tanh(s)
-#             t = maski * self.translation_net[i](z * (1 - maski))
-            
-#             z = (z - t) * torch.exp(-s)
-
-#             # log_det_J += torch.sum(-s, dim=1)
-#         return z
-
-#     def sample(self, num_samples=1):
-#         z = torch.randn((num_samples, self.dim_input), device=self.device)
-#         samples = self.reverse(z)
-#         return samples
-
-
-# class IdentityTransform(nn.Module):
-#     def __init__(self):
-#         super(IdentityTransform, self).__init__()
-
-#     def forward(self, x):
-#         log_det_J = torch.zeros(x.size(0), device=x.device)
-#         return x, log_det_J
-
-#     def reverse(self, z):
-#         return z
-    
-# class SplineFlow(LazyNN):
-#     def __init__(self, dim_input, count_bins=8, bounds=3,device = 'cpu'): #'cuda'
-#         super().__init__(dim_input)
-        
-#         self.dim_input = dim_input
-#         self.countbins = count_bins
-#         self.bounds = bounds
-        
-#         if dim_input == 0:
-#             self.spline_transform = T.Spline(dim_input, count_bins=count_bins, bound=bounds)
-#         else:
-#             self.spline_transform = spline_autoregressive1(dim_input,n_flows=2,hidden_dims=[32, 32], count_bins=count_bins, bound=bounds, order='quadratic')
-
-#     def forward(self, x):
-#         z = self.spline_transform(x)
-#         logDet = self.spline_transform.log_abs_det_jacobian(x, z)
-#         return z, logDet
-
-#     def reverse(self, z):
-#         x = self.spline_transform.inv(z)
-#         # logDet = self.spline_transform.log_abs_det_jacobian(z, x)
-#         return x#, logDet
-
-# def spline_autoregressive1(input_dim, n_flows = 8, hidden_dims=None, count_bins=8, bound=3.0, order='linear'):
-#     r"""
-#     A helper function to create an
-#     :class:`~pyro.distributions.transforms.SplineAutoregressive` object that takes
-#     care of constructing an autoregressive network with the correct input/output
-#     dimensions.
-
-#     :param input_dim: Dimension of input variable
-#     :type input_dim: int
-#     :param hidden_dims: The desired hidden dimensions of the autoregressive network.
-#         Defaults to using [3*input_dim + 1]
-#     :type hidden_dims: list[int]
-#     :param count_bins: The number of segments comprising the spline.
-#     :type count_bins: int
-#     :param bound: The quantity :math:`K` determining the bounding box,
-#         :math:`[-K,K]\times[-K,K]`, of the spline.
-#     :type bound: float
-#     :param order: One of ['linear', 'quadratic'] specifying the order of the spline.
-#     :type order: string
-
-#     """
-
-#     if hidden_dims is None:
-#         hidden_dims = [input_dim * 10, input_dim * 10]
-
-#     if order=='quadratic':
-#         param_dims = [count_bins, count_bins, count_bins - 1]
-#     else:
-#         param_dims = [count_bins, count_bins, count_bins - 1, count_bins]
-        
-#     arns = nn.ModuleList([AutoRegressiveNN(input_dim,
-#             hidden_dims,
-#             param_dims=param_dims) for _ in range(n_flows)])
-    
-#     nfs = [T.SplineAutoregressive(input_dim, arns[0], count_bins=count_bins, bound=bound, order=order)]
-#     for i in range(n_flows-1):
-#         nfs.append(T.Permute(torch.arange(input_dim, dtype=torch.long).flip(0)))
-#         nfs.append(T.SplineAutoregressive(input_dim, arns[i], count_bins=count_bins, bound=bound, order=order))
-
-#     return T.ComposeTransform(nfs,cache_size=0)
-
-# ##############################################################################################
-# ##############################################################################################
-
-
-# ##############################################################################################
-# ###################################### Marg + Post MM ########################################
-# ##############################################################################################
-# def cov(X):
-#     D = X.shape[0]
-#     mean = torch.mean(X, dim=0)
-#     X = X - mean
-#     return 1/(D-1) * X.transpose(-1, -2) @ X
-
-
-# class VariationalMutualInformationOptimizer(object):
-#     def __init__(
-#         self, model, batch_size, data_source=None
-#     ):
-#         self.model = model
-#         self.batch_size = batch_size
-#         self.data_source = data_source
-
-#     def _vectorized(self, fn, *shape, name="vectorization_plate"):
-#         """
-#         Wraps a callable inside an outermost :class:`~pyro.plate` to parallelize
-#         MI computation over `num_particles`, and to broadcast batch shapes of
-#         sample site functions in accordance with the `~pyro.plate` contexts
-#         within which they are embedded.
-#         :param fn: arbitrary callable containing Pyro primitives.
-#         :return: wrapped callable.
-#         """
-
-#         def wrapped_fn(*args, **kwargs):
-#             with pyro.plate_stack(name, shape):
-#                 return fn(*args, **kwargs)
-
-#         return wrapped_fn
-
-#     def get_primary_rollout(self, args, kwargs, graph_type="flat", detach=False):
-#         """
-#         sample data: batch_size number of examples -> return trace
-#         """
-#         if self.data_source is None:
-#             model_v = self._vectorized(
-#                 self.model, self.batch_size, name="outer_vectorization"
-#             )
-#         else:
-#             data = next(self.data_source)
-#             model = pyro.condition(
-#                 self._vectorized(model, self.batch_size, name="outer_vectorization"),
-#                 data=data,
-#             )
-
-#         trace = poutine.trace(model_v, graph_type=graph_type).get_trace(*args, **kwargs)
-#         if detach:
-#             # what does the detach do?
-#             trace.detach_()
-#         trace = prune_subsample_sites(trace)
-#         return trace
-
-#     def _get_data(self, args, kwargs, graph_type="flat", detach=False):
-#         # esample a trace and xtract the relevant data from it
-#         trace = self.get_primary_rollout(args, kwargs, graph_type, detach)
-#         designs = [
-#             node["value"]
-#             for node in trace.nodes.values()
-#             if node.get("subtype") == "design_sample"
-#         ]
-#         observations = [
-#             node["value"]
-#             for node in trace.nodes.values()
-#             if node.get("subtype") == "observation_sample"
-#         ]
-#         latents = [
-#             node["value"]
-#             for node in trace.nodes.values()
-#             if node.get("subtype") == "latent_sample"
-#         ]
-#         latents = torch.cat(latents, axis=-1)
-#         return (latents, *zip(designs, observations))
-
-# class MomentMatchMarginalPosterior(VariationalMutualInformationOptimizer):
-#     def __init__(self, model, batch_size, flow_x, flow_y,device, **kwargs):
-#         super().__init__(
-#             model=model, batch_size=batch_size
-#         )
-#         self.mu = 0
-#         self.Sigma = 0
-#         self.hX = 0
-#         self.hX_Y = 0
-#         self.fX = flow_x
-#         self.gY = flow_y
-#         self.pi_const = 2*torch.acos(torch.zeros(1)).to(device)
-#         self.e_const = torch.exp(torch.tensor([1])).to(device)
-
-#     def differentiable_loss(self, *args, **kwargs):
-#         # sample from design
-#         latents, *history = self._get_data(args, kwargs)
-        
-#         dim_lat = latents.shape[1]
-#         dim_obs = history[0][1].shape[1]
-        
-#         if hasattr(self.fX, "parameters"):
-#             #! this is required for the pyro optimizer
-#             pyro.module("flow_x_net", self.fX)
-#         if hasattr(self.gY, "parameters"):
-#             #! this is required for the pyro optimizer
-#             pyro.module("flow_y_net", self.gY)
-        
-#         mufX, logDetJfX = self.fX.forward(latents)
-#         mugY, logDetJgY = self.gY.forward(history[0][1])
-        
-#         #compute loss
-#         data = torch.cat([mufX,mugY],axis=1)
-        
-#         Sigma = cov(data)+1e-4*torch.eye(dim_lat+dim_obs).to(latents.device)
-#         self.hX = .5*torch.log(torch.linalg.det(Sigma[:dim_lat,:dim_lat]))+(dim_lat/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)
-#         hY = .5*torch.log(torch.linalg.det(Sigma[dim_lat:,dim_lat:]))+(dim_obs/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY)
-#         hXY = .5*torch.log(torch.linalg.det(Sigma))+((dim_lat+dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)-torch.mean(logDetJgY)
-#         self.hX_Y = hXY-hY
-#         hY_X = hXY-self.hX
-        
-#         # save optimal parameters for decision
-#         self.mu = torch.mean(data,axis=0)
-#         self.Sigma = Sigma
-#         return self.hX+self.hX_Y+hY_X+hY-torch.detach(2*self.hX_Y+hY_X+hY)
-
-#     def loss(self, *args, **kwargs):
-#         """
-#         :returns: returns an estimate of the mutual information
-#         :rtype: float
-#         Evaluates the MI lower bound using the BA lower bound == -EIG
-#         """
-#         return self.hX-self.hX_Y
-
-# ##############################################################################################
-# ##############################################################################################
 

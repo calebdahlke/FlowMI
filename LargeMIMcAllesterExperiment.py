@@ -131,7 +131,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-samples", default=25000, type=int)
     parser.add_argument("--train_test_split", default=.8, type=float)
     parser.add_argument("--batch-size", default=256, type=int)
-    parser.add_argument("--test_every_n_steps", default=25, type=int)
+    parser.add_argument("--test_every_n_steps", default=50, type=int)
     
     parser.add_argument("--lr", default=0.001, type=float)
     parser.add_argument("--num-steps", default=10000, type=int)

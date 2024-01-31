@@ -676,7 +676,7 @@ class FlowMargPostEstimator(IMutualInformationPointEstimator):
         train_test_split: Optional[float] = _estimators._DEFAULT_TRAIN_TEST_SPLIT,
         test_every_n_steps: int = _estimators._DEFAULT_TEST_EVERY_N,
         learning_rate: float = _estimators._DEFAULT_LEARNING_RATE,
-        flow_layers: int = 8,
+        flow_layers: int = 4,
         nn_width: int = 50,
         nn_depth: int = 1,
         knots: int = 8,

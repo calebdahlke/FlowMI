@@ -30,284 +30,7 @@ import copy
 from simulations import solve_sir_sdes_var, EpidemicVar
 # from mm_locfin_variational import IdentityTransform, RealNVP, MomentMatchMarginalPosterior, SplineFlow
 from flow_estimator_pyro import MomentMatchMarginalPosterior, SplineFlow, IdentityTransform, RealNVP
-# ##############################################################################################
-# ############################### Alternative Epidemic Model ###################################
-# ##############################################################################################
-# from oed.primitives import observation_sample, latent_sample, compute_design
-# import pandas as pd
-# from epidemic import SIR_SDE_Simulator
-# class Epidemic2(nn.Module):
 
-#     """
-#     Class for the SDE-based SIR model. This version loads in pre-simulated data
-#     and then access observations corresponding to the emitted design.
-#     """
-
-#     def __init__(
-#         self,
-#         design_net,
-#         T,
-#         design_transform="iid",
-#         simdata=None,
-#         lower_bound=torch.tensor(1e-2),
-#         upper_bound=torch.tensor(100.0 - 1e-2),
-#     ):
-
-#         super().__init__()#Epidemic2, self
-
-#         self.p = 2  # dim of latent
-#         self.design_net = design_net
-#         self.T = T  # number of experiments
-#         self.SIMDATA = simdata
-#         loc = torch.tensor([0.5, 0.1]).log().to(simdata["ys"].device)
-#         covmat = torch.eye(2).to(simdata["ys"].device) * 0.5 ** 2
-#         self._prior_on_log_theta = torch.distributions.MultivariateNormal(loc, covmat)
-#         self.lower_bound = lower_bound
-#         self.upper_bound = upper_bound
-
-#         if design_transform == "ts":
-#             self.transform_designs = self._transform_designs_increasing
-#         elif design_transform == "iid":
-#             self.transform_designs = self._transform_designs_independent
-#         else:
-#             raise ValueError
-
-#     def simulator(self, xi, theta, batch_data):
-#         # extract data from global dataset
-#         sim_sir = SIR_SDE_Simulator.apply
-#         y = sim_sir(xi, batch_data, theta.device)
-
-#         return y
-
-#     def _get_batch_data(self, indices):
-#         batch_data = {
-#             "ys": self.SIMDATA["ys"][:, indices],
-#             "prior_samples": self.SIMDATA["prior_samples"][indices, :],
-#             "ts": self.SIMDATA["ts"],
-#             "dt": self.SIMDATA["dt"],
-#         }
-#         return batch_data
-
-#     def _transform_designs_increasing(self, xi_untransformed, xi_prev):
-#         xi_prop = nn.Sigmoid()(xi_untransformed)
-#         xi = xi_prev + xi_prop * (self.upper_bound - xi_prev)
-#         return xi
-
-#     def _transform_designs_independent(self, xi_untransformed, xi_prev=None):
-#         xi_prop = nn.Sigmoid()(xi_untransformed)
-#         xi = self.lower_bound + xi_prop * (self.upper_bound - self.lower_bound)
-#         return xi
-
-#     def _remove_data(self):
-#         self.SIMDATA = None
-
-#     def theta_to_index(self, theta):
-#         theta_expanded = theta.unsqueeze(1).expand(
-#             theta.shape[0], self.SIMDATA["prior_samples"].shape[0], theta.shape[1]
-#         )
-#         norms = torch.linalg.norm(
-#             self.SIMDATA["prior_samples"] - theta_expanded, dim=-1
-#         )
-#         closest_indices = norms.min(-1).indices
-#         assert closest_indices.shape[0] == theta.shape[0]
-#         return closest_indices
-
-#     def model(self):
-#         if hasattr(self.design_net, "parameters"):
-#             pyro.module("design_net", self.design_net)
-
-#         device = self.SIMDATA["prior_samples"].device
-#         prior_on_index = dist.Categorical(
-#             torch.ones(self.SIMDATA["num_samples"], device=device)
-#         )
-
-#         ################################################################################
-#         # Sample theta
-#         ################################################################################
-#         # conditioning should be on the indices:
-
-#         indices = pyro.sample("indices", prior_on_index)
-#         batch_data = self._get_batch_data(indices)
-
-#         # helper to 'sample' theta
-#         def get_theta():
-#             return batch_data["prior_samples"].log()
-
-#         theta = latent_sample("theta", get_theta)
-#         theta = theta.exp()
-
-#         y_outcomes = []
-#         xi_designs = []
-
-#         # at t=0 set last design equal to the lower bound
-#         xi_prev = self.lower_bound
-
-#         for t in range(self.T):
-#             ####################################################################
-#             # Get a design xi
-#             ####################################################################
-#             xi_untransformed = compute_design(
-#                 f"xi{t + 1}", self.design_net.lazy(*zip(xi_designs, y_outcomes))
-#             )
-#             # squeeze the first dim (corrresponds to <n>)
-#             xi = self.transform_designs(
-#                 xi_untransformed=xi_untransformed.squeeze(1), xi_prev=xi_prev,
-#             )
-
-#             ####################################################################
-#             # Sample y
-#             ####################################################################
-#             y = observation_sample(
-#                 f"y{t + 1}", self.simulator, xi=xi, theta=theta, batch_data=batch_data
-#             )
-
-#             ####################################################################
-#             # Update history
-#             ####################################################################
-#             y_outcomes.append(y)
-#             xi_designs.append(xi_untransformed)  #! pass untransformed
-
-#             xi_prev = xi  # set current design as previous for next loop
-
-#         del batch_data  # delete manually just in case
-#         return theta, xi_designs, y_outcomes
-
-#     def forward(self, indices):
-#         """ Run the policy for a given index (corresponding to a latent theta) """
-#         self.design_net.eval()
-
-#         def conditioned_model():
-#             # indices = self.theta_to_index(theta)
-#             with pyro.plate_stack("expand_theta_test", [indices.shape[0]]):
-#                 # condition on "theta" (ie the corresponding indices)
-#                 return pyro.condition(self.model, data={"indices": indices})()
-
-#         with torch.no_grad():
-#             theta, designs, observations = conditioned_model()
-
-#         return theta, designs, observations
-
-#     def eval(self, theta=None, verbose=False):
-#         """
-#         Run policy and produce a df with output
-#         """
-#         self.design_net.eval()
-#         # can't do more than one in this form since we (in all likelihood)
-#         # have one realisation per theta
-#         n_trace = 1
-#         if theta is None:
-#             theta = self._prior_on_log_theta.sample(torch.Size([1])).exp()
-#             indices = self.theta_to_index(theta)
-#         else:
-#             indices = self.theta_to_index(theta)
-
-#         output = []
-#         theta, designs, observations = self.forward(indices)
-#         for i in range(n_trace):
-#             run_xis = []
-#             run_ys = []
-
-#             xi_prev = self.lower_bound
-#             if verbose:
-#                 print("Example run")
-#                 print(f"*True Theta: {theta[i]}*")
-
-#             for t in range(self.T):
-#                 xi_untransformed = designs[t][i].detach().cpu()
-#                 xi = self.transform_designs(
-#                     xi_untransformed=xi_untransformed.squeeze(0), xi_prev=xi_prev,
-#                 )
-#                 xi_prev = xi
-#                 run_xis.append(xi.cpu().reshape(-1))
-#                 y = observations[t][i].detach().cpu().item()
-#                 run_ys.append(y)
-
-#                 if verbose:
-#                     print(f"xi{t + 1}: {run_xis[-1][0].data}  y{t + 1}: {y}")
-
-#             run_df = pd.DataFrame(torch.stack(run_xis).numpy())
-#             run_df.columns = [f"xi_{i}" for i in range(xi.shape[0])]
-#             run_df["observations"] = run_ys
-#             run_df["order"] = list(range(1, self.T + 1))
-#             run_df["run_id"] = i + 1
-#             output.append(run_df)
-
-#         return pd.concat(output), theta.cpu().numpy()
-
-# def solve_sir_sdes2(
-#     num_samples,
-#     device,
-#     grid=10000,
-#     savegrad=False,
-#     save=False,
-#     filename="sir_sde_data.pt",
-#     theta_loc=None,
-#     theta_covmat=None,
-#     flows_theta= None,
-# ):
-#     ####### Change priors here ######
-#     if theta_loc is None or theta_covmat is None:
-#         theta_loc = torch.tensor([0.5, 0.1], device=device).log()
-#         theta_covmat = torch.eye(2, device=device) * 0.5 ** 2
-
-#     prior = torch.distributions.MultivariateNormal(theta_loc, theta_covmat)
-#     params_Z = prior.sample(torch.Size([num_samples]))#.exp()
-#     with torch.no_grad():
-#         params_theta = flows_theta.reverse(params_Z)
-#         params = params_theta.exp()
-#     #################################
-
-#     T0, T = 0.0, 100.0  # initial and final time
-#     GRID = grid  # time-grid
-
-#     population_size = 500.0
-#     initial_infected = 2.0  # initial number of infected
-
-#     ## [non-infected, infected]
-#     y0 = torch.tensor(
-#         num_samples * [[population_size - initial_infected, initial_infected]],
-#         device=device,
-#     )  # starting point
-#     ts = torch.linspace(T0, T, GRID, device=device)  # time grid
-
-#     sde = SIR_SDE(
-#         population_size=torch.tensor(population_size, device=device), params=params,
-#     ).to(device)
-
-#     start_time = time.time()
-#     ys = torchsde.sdeint(sde, y0, ts)  # solved sde
-#     end_time = time.time()
-#     # return ys0, ys1
-#     print("Simulation Time: %s seconds" % (end_time - start_time))
-
-#     save_dict = dict()
-#     idx_good = torch.where(ys[:, :, 1].mean(0) >= 1)[0]
-
-#     save_dict["prior_samples"] = params[idx_good].cpu()
-#     save_dict["ts"] = ts.cpu()
-#     save_dict["dt"] = (ts[1] - ts[0]).cpu()  # delta-t (time grid)
-#     # drop 0 as it's not used (saves space)
-#     save_dict["ys"] = ys[:, idx_good, 1].cpu()
-
-#     # grads can be calculated in backward pass (saves space)
-#     if savegrad:
-#         # central difference
-#         grads = (ys[2:, ...] - ys[:-2, ...]) / (2 * save_dict["dt"])
-#         save_dict["grads"] = grads[:, idx_good, :].cpu()
-
-#     # meta data
-#     save_dict["N"] = population_size
-#     save_dict["I0"] = initial_infected
-#     save_dict["num_samples"] = save_dict["prior_samples"].shape[0]
-
-#     if save:
-#         print("Saving data.", end=" ")
-#         torch.save(save_dict, f"data/{filename}")
-
-#     print("DONE.")
-#     return save_dict
-# ##############################################################################################
-# ##############################################################################################
 
 def optimise_design(
     simdata,
@@ -316,6 +39,8 @@ def optimise_design(
     posterior_cov,
     flow_theta,
     flow_obs,
+    train_flow,
+    run_flow,
     experiment_number,
     device,
     batch_size,
@@ -345,23 +70,23 @@ def optimise_design(
     latent_dim = 2  #
     observation_dim = n
 
-    hidden = 64#None#
-    if hidden == None:
-        fX = IdentityTransform()
-        gY = IdentityTransform()
-    else:
+    if run_flow:
         dim_x = latent_dim
         dim_y = observation_dim ### Try Quadratic and test bin/bound layers try 12
         if flow_theta == None:
             fX = SplineFlow(dim_x, count_bins=8, bounds=5, device=device).to(device)
+            # fX = RealNVP(dim_x, num_blocks=3, dim_hidden=hidden//2,device=device).to(device)
         else:
             fX = copy.deepcopy(flow_theta)
         if flow_obs == None:
             gY = SplineFlow(dim_y, count_bins=8, bounds=5, device=device).to(device)
+            # gY = RealNVP(dim_y, num_blocks=3, dim_hidden=hidden//2,device=device).to(device)
         else:
             gY = copy.deepcopy(flow_obs)
-        # fX = RealNVP(dim_x, num_blocks=3, dim_hidden=hidden//2,device=device).to(device)
-        # gY = RealNVP(dim_y, num_blocks=3, dim_hidden=hidden//2,device=device).to(device)
+    else:
+        fX = IdentityTransform()
+        gY = IdentityTransform()
+        
     
     ### Set-up loss ###
     mi_loss_instance = MomentMatchMarginalPosterior(
@@ -369,6 +94,7 @@ def optimise_design(
         batch_size=batch_size,
         flow_x=fX,
         flow_y=gY,
+        train_flow=train_flow,
         device=device
     )
     
@@ -408,6 +134,8 @@ def main_loop(
     mlflow_run_id,
     device,
     T,
+    train_flow_every_step,
+    run_flow,
     batch_size,
     num_steps,
     lr,
@@ -422,12 +150,19 @@ def main_loop(
     theta_covmat = torch.eye(2, device=device) * 0.5 ** 2
     flow_theta = None#IdentityTransform()
     flow_obs = None#IdentityTransform()
+    train_flow = True
     prior = torch.distributions.MultivariateNormal(theta_loc, theta_covmat)
 
     if true_theta is None:
         # true_theta = prior.sample(torch.Size([1])).exp()
         true_theta = torch.tensor([[.33,.11]])#Middle R0#torch.tensor([[.7,.075]])#HighR0 #torch.tensor([[.15,.15]])#Low R0#
-
+    time_per_design = []
+    mus_so_far = []
+    sigmas_so_far = []
+    flow_theta_so_far = []
+    flow_obs_so_far = []
+    posterior_loc_so_far = []
+    posterior_cov_so_far = []
     design_trans_so_far = []
     designs_so_far = []
     observations_so_far = []
@@ -439,6 +174,7 @@ def main_loop(
     
     previous_design = torch.tensor(0.0, device=device)  # no previous design
     for t in range(0, T):
+        t_start = time.time()
         print(f"Step {t + 1}/{T} of Run {run + 1}")
         pyro.clear_param_store()
         if t > 0:
@@ -470,6 +206,8 @@ def main_loop(
             posterior_cov=posterior_cov,
             flow_theta = flow_theta,
             flow_obs = flow_obs,
+            train_flow=train_flow,
+            run_flow=run_flow,
             experiment_number=t,
             device=device,
             batch_size=batch_size,
@@ -495,18 +233,28 @@ def main_loop(
             # obs = observation[0]
             posterior_loc = (mux + torch.matmul(Sigmaxy,torch.linalg.solve(Sigmayy,(obs-muy))).flatten())
             max_posterior = mi_loss_instance.fX.reverse(posterior_loc).exp()
-            print(true_theta)#flow_theta.reverse
-            print(posterior_loc)#
-            print(mi_loss_instance.fX.reverse(posterior_loc).exp())
+            # print(true_theta)#flow_theta.reverse
+            # print(posterior_loc)#
+            # print(mi_loss_instance.fX.reverse(posterior_loc).exp())
             posterior_cov = Sigmaxx-torch.matmul(Sigmaxy,torch.linalg.solve(Sigmayy,Sigmaxy.T))
             flow_theta = mi_loss_instance.fX
             flow_obs = mi_loss_instance.gY
         ###################################################################################################
-  
+        t_end = time.time()
+        run_time = t_end-t_start
         
+        mus_so_far.append(mi_loss_instance.mu.detach().clone().numpy())
+        sigmas_so_far.append(mi_loss_instance.Sigma.detach().clone().numpy())
+        flow_theta_so_far.append(copy.deepcopy(mi_loss_instance.fX))
+        flow_obs_so_far.append(copy.deepcopy(mi_loss_instance.gY))
+        posterior_loc_so_far.append(posterior_loc.numpy())
+        posterior_cov_so_far.append(posterior_cov.numpy())
+        time_per_design.append(run_time)
         design_trans_so_far.append(design_transformed)
         designs_so_far.append(design_untransformed[0])
         observations_so_far.append(observation[0])
+        if not train_flow_every_step:
+            train_flow = False
 
     print(f"Final posterior: mean = {posterior_loc}, sd = {posterior_cov}")
     print(f"True theta = {true_theta}")
@@ -517,8 +265,20 @@ def main_loop(
     for i, y in enumerate(observations_so_far):
         data_dict[f"y{i + 1}"] = y.cpu()
     data_dict["theta"] = true_theta.cpu()
+    
+    extra_data = {}
+    extra_data["mu"] = mus_so_far
+    extra_data["sigmas"] = sigmas_so_far
+    extra_data["flow_theta"] = flow_theta_so_far
+    extra_data["flow_obs"] = flow_obs_so_far
+    extra_data["posterior_loc"] = posterior_loc_so_far
+    extra_data["posterior_cov"] = posterior_cov_so_far
+    extra_data["design_time"] = time_per_design
+    extra_data["designs_trans"] = design_trans_so_far
+    extra_data["designs_untrans"] = designs_so_far
+    extra_data["observations"] = observations_so_far
 
-    return data_dict
+    return data_dict, extra_data
 
 
 def main(
@@ -527,6 +287,8 @@ def main(
     num_loop,
     device,
     T,
+    train_flow_every_step,
+    run_flow,
     batch_size,
     num_steps,
     lr,
@@ -550,14 +312,22 @@ def main(
 
     if not os.path.exists("./mlflow_outputs"):
         os.makedirs("./mlflow_outputs")
-
+    extra_meta = {
+        "model": "SIR_epidemic",
+        "train_flow_every_step": train_flow_every_step,
+        "run_flow": run_flow,
+        "seed": seed
+    }
     results_vi = {"loop": [], "seed": seed}
+    extra_vi = {"loop":[],"meta":extra_meta}
     for i in range(num_loop):
-        results = main_loop(
+        results, extra_data = main_loop(
             run=i,
             mlflow_run_id=mlflow.active_run().info.run_id,
             device=device,
             T=T,
+            train_flow_every_step=train_flow_every_step,
+            run_flow=run_flow,
             batch_size=batch_size,
             num_steps=num_steps,
             lr=lr / (i + 1),
@@ -565,6 +335,7 @@ def main(
             annealing_scheme=annealing_scheme,
         )
         results_vi["loop"].append(results)
+        extra_vi["loop"].append(extra_data)
 
     # Log the results dict as an artifact
     with open("./mlflow_outputs/results_sir_vi.pickle", "wb") as f:
@@ -572,6 +343,13 @@ def main(
     mlflow.log_artifact("mlflow_outputs/results_sir_vi.pickle")
     print("Done.")
 
+    t = time.localtime()
+    run_id = time.strftime("%Y%m%d%H%M%S", t)
+    path_to_artifact = "./experiment_outputs/SIR/{}".format(run_id)
+    if not os.path.exists("./experiment_outputs/SIR"):
+        os.makedirs("./experiment_outputs/SIR")
+    with open(path_to_artifact, "wb") as f:
+        pickle.dump(extra_vi, f)
     # --------------------------------------------------------------------------
 
 
