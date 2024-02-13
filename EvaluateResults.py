@@ -5,15 +5,15 @@ import pickle
 import os
 
 ESTIMATOR_COLORS = {
-    "TrueMI": "rgb(0,0,0,1.0)", # Black
-    "FlowP": "rgb(204,0,0,1.0)", # Red
-    "FlowMP": "rgb(0,0,153,1.0)", # Blue
-    "MINE": "rgb(0,204,204,1.0)", # Light Blue
-    "InfoNCE": "rgb(0,153,0,1.0)", # Green
-    "NWJ": "rgb(255,0,127,1.0)", # Pink
-    "DV": "rgb(204,102,0,1.0)", # Orange
-    "KSG": "rgb(102,51,0,1.0)", # Brown
-    "CCA": "rgb(96,96,96,1.0)", # Grey
+    "TrueMI": "rgba(0,0,0,1.0)", # Black
+    "FlowP": "rgba(204,0,0,1.0)", # Red
+    "FlowMP": "rgba(0,0,153,1.0)", # Blue
+    "MINE": "rgba(0,204,204,1.0)", # Light Blue
+    "InfoNCE": "rgba(0,153,0,1.0)", # Green
+    "NWJ": "rgba(255,0,127,1.0)", # Pink
+    "DV": "rgba(204,102,0,1.0)", # Orange
+    "KSG": "rgba(102,51,0,1.0)", # Brown
+    "CCA": "rgba(96,96,96,1.0)", # Grey
 }
 
 def plotMcAlester(data_dict,path_to_artifact):
@@ -32,9 +32,12 @@ def plotMcAlester(data_dict,path_to_artifact):
             fig.add_trace(go.Scatter(x = np.array(Results[best_arg].additional_information['training_history'])[:,0]-1,
                                     y = np.array(Results[best_arg].additional_information['training_history'])[:,1],
                                     name = key+' Train', 
-                                    line = dict(color=ESTIMATOR_COLORS[key][:-4]+"0.5)", # add opacity
+                                    line = dict(color=ESTIMATOR_COLORS[key][:-4]+"0.5)", # add opacity 
                                                 dash = 'dash',
                                                 width = 3)))
+    for index, key in enumerate(data_dict):
+        if key not in ["Experiment","TrueMI"]:
+            [Results, best_arg] = data_dict[key] 
             fig.add_trace(go.Scatter(x = np.array(Results[best_arg].additional_information['test_history'])[:,0]-1,
                                     y = np.array(Results[best_arg].additional_information['test_history'])[:,1],
                                     name = key+' Test', 
@@ -65,16 +68,95 @@ def plotMcAlester(data_dict,path_to_artifact):
     fig.show()
     print("Done.")
 
+def plotBMI(data_dict,path_to_artifact):
+    means = np.zeros((len(data_dict['task_list']),len(data_dict['method_names'])))
+    data_dict['method_names'].reverse()
+    for i, method in enumerate(data_dict['method_names']):
+        for j, task in enumerate(data_dict['task_list']):
+            means[j, i] = format(np.mean(data_dict['task_data'][j][method]),'.2f')
+
+    # Add a row for true values
+    true_values = np.array([format(data_dict['task_data'][i][task],'.2f') for i, task in enumerate(data_dict['task_list'])])
+    means = np.hstack((means,true_values.reshape(-1,1)))
+    Methods = data_dict['method_names']
+    Methods.append('True')
+
+    # Define layout
+    fig = go.Figure(data=[go.Table(#values=[Methods] + [means[j] for j in range(len(data_dict['task_list']))]
+        cells=dict(values = means,
+                fill_color='lavender',
+                align='left'))
+    ])
+
+    # Define layout
+    fig.update_layout(
+                    autosize=True,
+                    )
+    fig.for_each_trace(lambda t: t.update(header_fill_color = 'rgba(0,0,0,0)'))
+    # Create annotations for rotated method names (column headers)
+    annotations = []
+    col_title = ['']+data_dict['task_list']
+    for i, task in enumerate(col_title):
+        x = i / (len(col_title))  # Normalize positions
+        y = .55
+        annotations.append(
+            go.layout.Annotation(
+                x=x,
+                y=y,
+                text=task,
+                showarrow=False,
+                textangle=305,
+                xanchor="center",
+                font=dict(
+                    size=12,
+                )
+            )
+        )
+    row_title = ['']+Methods    
+    for i, method in enumerate(row_title):
+        x = -.01  # Normalize positions
+        y = 1-i / (4.85*len(row_title))
+        annotations.append(
+            go.layout.Annotation(
+                x=x,
+                y=y,
+                text=method,
+                showarrow=False,
+                textangle=0,
+                xanchor="center",
+                font=dict(
+                    size=12,
+                )
+            )
+        )
+
+    # Add created annotations and update layout
+    fig.update_layout(annotations=annotations, margin=dict(t=0, b=0,l=50,r=0))#
+
+    fig.show()
+    #pandas and seaborn
+    print("Done.")
+    
+
 def main(path_to_artifact):
 
     with open(path_to_artifact, "rb") as input_file:
         data_dict = pickle.load(input_file)
-    if data_dict["Experiment"][0] == "McAllester_experiment":
+    first = path_to_artifact.index('/')+1
+    second = path_to_artifact.index('/',first,len(path_to_artifact))
+    experiment_name = path_to_artifact[first:second]
+    if experiment_name == 'BMI':
+        plotBMI(data_dict,path_to_artifact)
+    # if data_dict["Experiment"][0] == "McAllester_experiment":
+    if experiment_name == 'LargeMI':
         plotMcAlester(data_dict,path_to_artifact)
+    if experiment_name == 'loc_fin':
+        print("not yet implimented")
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluation")
-    parser.add_argument("--path-to-artifact", default="experiment_outputs/LargeMI/20240130004239", type=str)
+    parser.add_argument("--path-to-artifact", default="experiment_outputs/BMI/20240130012752", type=str)
+    #McAllester HPC: experiment_outputs/LargeMI/20240130210847
     args = parser.parse_args()
 
     main(path_to_artifact=args.path_to_artifact)

@@ -19,6 +19,8 @@ from oed.design import OED
 from pyro import poutine
 from pyro.poutine.util import prune_subsample_sites
 
+from joblib import Parallel, delayed
+
 # import datetime
 # import math
 # import subprocess
@@ -230,16 +232,16 @@ def main_loop(
         run_time = t_end-t_start
 
         
-        mus_so_far.append(mi_loss_instance.mu.detach().clone().numpy())
-        sigmas_so_far.append(mi_loss_instance.Sigma.detach().clone().numpy())
-        flow_theta_so_far.append(copy.deepcopy(mi_loss_instance.fX))
-        flow_obs_so_far.append(copy.deepcopy(mi_loss_instance.gY))
+        mus_so_far.append(mi_loss_instance.mu.detach().clone().cpu().numpy())
+        sigmas_so_far.append(mi_loss_instance.Sigma.detach().clone().cpu().numpy())
+        flow_theta_so_far.append(copy.deepcopy(mi_loss_instance.fX).cpu())
+        flow_obs_so_far.append(copy.deepcopy(mi_loss_instance.gY).cpu())
 
-        posterior_loc_so_far.append(posterior_loc.numpy())
-        posterior_cov_so_far.append(posterior_cov.numpy())
+        posterior_loc_so_far.append(posterior_loc.cpu().numpy())
+        posterior_cov_so_far.append(posterior_cov.cpu().numpy())
         time_per_design.append(run_time)
-        designs_so_far.append(design[0])
-        observations_so_far.append(observation[0])
+        designs_so_far.append(design[0].detach().clone().cpu())
+        observations_so_far.append(observation[0].cpu())
         if not train_flow_every_step:
             train_flow = False
 
@@ -264,7 +266,7 @@ def main_loop(
     extra_data["designs"] = designs_so_far
     extra_data["observations"] = observations_so_far
 
-    return data_dict, extra_data
+    return [data_dict, extra_data]
 
 
 def main(
@@ -319,24 +321,43 @@ def main(
 
     results_vi = {"loop": [], "seed": seed, "meta": meta}
     extra_vi = {"loop":[],"meta":extra_meta}
+    
+    results = Parallel(n_jobs=num_histories)(delayed(main_loop)(run=i,
+                            mlflow_run_id=mlflow.active_run().info.run_id,
+                            device=device,
+                            T=T,
+                            train_flow_every_step=train_flow_every_step,
+                            run_flow=run_flow,
+                            noise_scale=noise_scale,
+                            num_sources=num_sources,
+                            p=p,
+                            batch_size=batch_size,
+                            num_steps=num_steps,
+                            lr=lr,
+                            annealing_scheme=annealing_scheme,
+                        ) for i in range(num_histories))
     for i in range(num_histories):
-        results, extra_data = main_loop(
-            run=i,
-            mlflow_run_id=mlflow.active_run().info.run_id,
-            device=device,
-            T=T,
-            train_flow_every_step=train_flow_every_step,
-            run_flow=run_flow,
-            noise_scale=noise_scale,
-            num_sources=num_sources,
-            p=p,
-            batch_size=batch_size,
-            num_steps=num_steps,
-            lr=lr,
-            annealing_scheme=annealing_scheme,
-        )
-        results_vi["loop"].append(results)
-        extra_vi["loop"].append(extra_data)
+        results_vi["loop"].append(results[i][0])
+        extra_vi["loop"].append(results[i][1])
+    
+    # for i in range(num_histories):
+    #     results = main_loop(
+    #         run=i,
+    #         mlflow_run_id=mlflow.active_run().info.run_id,
+    #         device=device,
+    #         T=T,
+    #         train_flow_every_step=train_flow_every_step,
+    #         run_flow=run_flow,
+    #         noise_scale=noise_scale,
+    #         num_sources=num_sources,
+    #         p=p,
+    #         batch_size=batch_size,
+    #         num_steps=num_steps,
+    #         lr=lr,
+    #         annealing_scheme=annealing_scheme,
+    #     )
+    #     results_vi["loop"].append(results[0])
+    #     extra_vi["loop"].append(results[1])
 
     # Log the results dict as an artifact
     if not os.path.exists("./mlflow_outputs"):
@@ -370,14 +391,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-histories", help="Number of histories/rollouts", default=2, type=int#128
     )
-    parser.add_argument("--num-experiments", default=10, type=int)  # 10
+    parser.add_argument("--num-experiments", default=2, type=int)  # 10
     parser.add_argument("--batch-size", default=256, type=int)#512,1024
-    parser.add_argument("--device", default="cpu", type=str)#"cuda"
+    parser.add_argument("--device", default="cuda", type=str)#"cuda""cpu"
     parser.add_argument(
         "--mlflow-experiment-name", default="locfin_mm_variational", type=str
     )
     parser.add_argument("--lr", default=0.005, type=float)#0.005
-    parser.add_argument("--num-steps", default=5000, type=int)#
+    parser.add_argument("--num-steps", default=500, type=int)#
     parser.add_argument("--train-flow-every-step", default=False, type=bool)
     parser.add_argument("--run-flow", default=True, type=bool)
     

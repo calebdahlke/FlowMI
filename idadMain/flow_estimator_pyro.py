@@ -125,7 +125,7 @@ class SplineFlow(LazyNN):
         if dim_input == 0:
             self.spline_transform = T.Spline(dim_input, count_bins=count_bins, bound=bounds)
         else:
-            self.spline_transform = spline_autoregressive1(dim_input,n_flows=2,hidden_dims=[50], count_bins=count_bins, bound=bounds, order='quadratic')
+            self.spline_transform = spline_autoregressive1(dim_input,n_flows=2,hidden_dims=[50], count_bins=count_bins, bound=bounds, order='quadratic', device=device)#.to(device)
 
     def forward(self, x):
         z = self.spline_transform(x)
@@ -137,7 +137,7 @@ class SplineFlow(LazyNN):
         # logDet = self.spline_transform.log_abs_det_jacobian(z, x)
         return x#, logDet
 
-def spline_autoregressive1(input_dim, n_flows = 2, hidden_dims=None, count_bins=8, bound=3.0, order='linear'):
+def spline_autoregressive1(input_dim, n_flows = 2, hidden_dims=None, count_bins=8, bound=3.0, order='linear',device = 'cuda'):
     r"""
     A helper function to create an
     :class:`~pyro.distributions.transforms.SplineAutoregressive` object that takes
@@ -169,14 +169,14 @@ def spline_autoregressive1(input_dim, n_flows = 2, hidden_dims=None, count_bins=
         
     arns = nn.ModuleList([AutoRegressiveNN(input_dim,
             hidden_dims,
-            param_dims=param_dims) for _ in range(n_flows)])
+            param_dims=param_dims) for _ in range(n_flows)]).to(device)
     
-    nfs = [T.SplineAutoregressive(input_dim, arns[0], count_bins=count_bins, bound=bound, order=order)]
+    nfs = [T.SplineAutoregressive(input_dim, arns[0], count_bins=count_bins, bound=bound, order=order).to(device)]
     for i in range(n_flows-1):
-        nfs.append(T.Permute(torch.arange(input_dim, dtype=torch.long).flip(0)))
-        nfs.append(T.SplineAutoregressive(input_dim, arns[i], count_bins=count_bins, bound=bound, order=order))
+        nfs.append(T.Permute(torch.arange(input_dim, dtype=torch.long).flip(0).to(device)))
+        nfs.append(T.SplineAutoregressive(input_dim, arns[i], count_bins=count_bins, bound=bound, order=order).to(device))
 
-    return T.ComposeTransformModule(nfs,cache_size=0)#T.ComposeTransform(nfs,cache_size=0)
+    return T.ComposeTransformModule(nfs,cache_size=0).to(device)#T.ComposeTransform(nfs,cache_size=0)
 
 ##############################################################################################
 ##############################################################################################

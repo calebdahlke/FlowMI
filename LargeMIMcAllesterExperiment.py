@@ -123,7 +123,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--device", default="cpu", type=str)
     
-    parser.add_argument("--dim", default=32, type=int)
+    parser.add_argument("--dim", default=2, type=int)#32
     parser.add_argument("--rho", default=.9, type=int)
     
     parser.add_argument("--num-runs", default=10, type=int)
@@ -134,7 +134,7 @@ if __name__ == "__main__":
     parser.add_argument("--test_every_n_steps", default=50, type=int)
     
     parser.add_argument("--lr", default=0.001, type=float)
-    parser.add_argument("--num-steps", default=10000, type=int)
+    parser.add_argument("--num-steps", default=500, type=int)#10000
     
     Methods = ['FlowP','FlowMP','MINE','InfoNCE','NWJ','DV']
     parser.add_argument("--method_names", default=Methods, type=list)
