@@ -107,25 +107,26 @@ def evaluate_parallel_task(j,
                             num_steps,
                             lr,
                             test_every_n_steps,
-                            method_names):
+                            method_names,
+                            path_to_artifact):
 
     np.random.seed(seed+j)
     
     task = bmi.benchmark.BENCHMARK_TASKS[task_list[j]]
     runs = {}
     runs[task_list[j]] = task.mutual_information
-    with parallel_backend("loky", inner_max_num_threads=num_runs):
-        results = Parallel(n_jobs=num_runs)(delayed(evaluate_parallel_run)(i,
-                                                    seed,
-                                                    task,
-                                                    num_samples,
-                                                    train_test_split,
-                                                    batch_size,
-                                                    num_steps,
-                                                    lr,
-                                                    test_every_n_steps,
-                                                    method_names
-                                                    ) for i in range(num_runs))
+    # with parallel_backend("loky", inner_max_num_threads=num_runs):
+    results = Parallel(n_jobs=num_runs)(delayed(evaluate_parallel_run)(i,
+                                                seed,
+                                                task,
+                                                num_samples,
+                                                train_test_split,
+                                                batch_size,
+                                                num_steps,
+                                                lr,
+                                                test_every_n_steps,
+                                                method_names
+                                                ) for i in range(num_runs))
     
     # results = []
     # for i in range(num_runs):
@@ -143,8 +144,13 @@ def evaluate_parallel_task(j,
         
     for k in results[0].keys():
         runs[k] = list(d[k] for d in results)
-        
-    return runs
+    
+    path_to_task_out = path_to_artifact + '/' + task.name
+    with open(path_to_task_out, "wb") as f:
+        pickle.dump(runs, f)
+    print('Finished '+ task.name)
+    del runs
+    return 1#runs
 
 def main(experiment_name,
         seed,
@@ -161,10 +167,24 @@ def main(experiment_name,
     
     num_tasks = len(task_list)
     
-    experiments = {}
-    experiments['task_list'] = task_list
-    experiments['method_names'] = method_names
-    task_data = Parallel(n_jobs=num_tasks)(delayed(evaluate_parallel_task)(j,
+    # Pickle the results
+    t = time.localtime()
+    run_id = time.strftime("%Y%m%d%H%M%S", t)
+    # run_id = experiment_name
+    path_to_artifact = "./experiment_outputs/BMI/{}".format(run_id)
+    if not os.path.exists(path_to_artifact):
+        os.makedirs(path_to_artifact)
+    meta = {}
+    meta['task_list'] = task_list
+    meta['method_names'] = method_names
+    path_to_meta = path_to_artifact + '/meta'
+    with open(path_to_meta, "wb") as f:
+        pickle.dump(meta, f)
+    
+    # experiments = {}
+    # experiments['task_list'] = task_list
+    # experiments['method_names'] = method_names
+    task_data = Parallel(n_jobs=5)(delayed(evaluate_parallel_task)(j,
                                                 seed,
                                                 task_list,
                                                 num_runs,
@@ -174,18 +194,19 @@ def main(experiment_name,
                                                 num_steps,
                                                 lr,
                                                 test_every_n_steps,
-                                                method_names
+                                                method_names,
+                                                path_to_artifact
                                                 ) for j in range(num_tasks))
-    experiments['task_data'] = task_data
-    # Pickle the results
-    t = time.localtime()
+    # experiments['task_data'] = task_data
+    # # Pickle the results
+    # t = time.localtime()
     # run_id = time.strftime("%Y%m%d%H%M%S", t)
-    run_id = experiment_name
-    path_to_artifact = "./experiment_outputs/BMI/{}".format(run_id)
-    if not os.path.exists("./experiment_outputs/BMI"):
-        os.makedirs("./experiment_outputs/BMI")
-    with open(path_to_artifact, "wb") as f:
-        pickle.dump(experiments, f)
+    # # run_id = experiment_name
+    # path_to_artifact = "./experiment_outputs/BMI/{}".format(run_id)
+    # if not os.path.exists("./experiment_outputs/BMI"):
+    #     os.makedirs("./experiment_outputs/BMI")
+    # with open(path_to_artifact, "wb") as f:
+    #     pickle.dump(experiments, f)
 
     print("Done.")
     print("Path to artifact - use this when evaluating:\n", path_to_artifact[2:])  
@@ -254,20 +275,20 @@ if __name__ == "__main__":
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--device", default="cpu", type=str)#"cuda"
     
-    parser.add_argument("--task_list", default=Trans1D1, type=list)#TASKS
+    parser.add_argument("--task_list", default=['swissroll_x-normal_cdf-1v1-normal-0.75'], type=list)#TASKS
     
-    parser.add_argument("--num_runs", default=3, type=int)#10
+    parser.add_argument("--num_runs", default=5, type=int)#10
     
     parser.add_argument("--num_samples", default=10000, type=int)
     parser.add_argument("--train_test_split", default=.8, type=float)
     parser.add_argument("--batch_size", default=256, type=int)
-    parser.add_argument("--test_every_n_steps", default=100, type=int)#1000
+    parser.add_argument("--test_every_n_steps", default=1000, type=int)#1000
     
-    parser.add_argument("--lr", default=0.003, type=float)
-    parser.add_argument("--num_steps", default=200, type=int)#10000
+    parser.add_argument("--lr", default=0.003, type=float)#.002
+    parser.add_argument("--num_steps", default=5000, type=int)#10000
     
-    Method_Names = ['FlowMP', 'MPGauss', 'MINE', 'InfoNCE', 'NWJ', 'DV', 'CCA', 'KSG']
-    # Method_Names = ['MPGauss']
+    # Method_Names = ['FlowMP', 'MPGauss', 'MINE', 'InfoNCE', 'NWJ', 'DV', 'CCA', 'KSG']
+    Method_Names = ['FlowMP']
     parser.add_argument("--method_names", default=Method_Names, type=list)
     
 

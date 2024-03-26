@@ -1,8 +1,15 @@
 import plotly.graph_objects as go
+import plotly.io as pio
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import seaborn as sns
 import argparse
 import numpy as np
+import pandas as pd
 import pickle
 import os
+import bmi
 
 ESTIMATOR_COLORS = {
     "TrueMI": "rgba(0,0,0,1.0)", # Black
@@ -16,8 +23,9 @@ ESTIMATOR_COLORS = {
     "CCA": "rgba(96,96,96,1.0)", # Grey
 }
 
-def plotMcAlester(data_dict,path_to_artifact):
-    
+def plotMcAlester(path_to_artifact):
+    with open(path_to_artifact, "rb") as input_file:
+        data_dict = pickle.load(input_file)
     num_steps = data_dict["Experiment"][9]
     fig = go.Figure()
     fig.add_trace(go.Scatter(x = np.linspace(0,num_steps-1,num_steps),
@@ -29,8 +37,8 @@ def plotMcAlester(data_dict,path_to_artifact):
     for index, key in enumerate(data_dict):
         if key not in ["Experiment","TrueMI"]:
             [Results, best_arg] = data_dict[key] 
-            fig.add_trace(go.Scatter(x = np.array(Results[best_arg].additional_information['training_history'])[:,0]-1,
-                                    y = np.array(Results[best_arg].additional_information['training_history'])[:,1],
+            fig.add_trace(go.Scatter(x = np.array(Results[3].additional_information['training_history'])[:,0]-1,
+                                    y = np.array(Results[3].additional_information['training_history'])[:,1],
                                     name = key+' Train', 
                                     line = dict(color=ESTIMATOR_COLORS[key][:-4]+"0.5)", # add opacity 
                                                 dash = 'dash',
@@ -38,8 +46,8 @@ def plotMcAlester(data_dict,path_to_artifact):
     for index, key in enumerate(data_dict):
         if key not in ["Experiment","TrueMI"]:
             [Results, best_arg] = data_dict[key] 
-            fig.add_trace(go.Scatter(x = np.array(Results[best_arg].additional_information['test_history'])[:,0]-1,
-                                    y = np.array(Results[best_arg].additional_information['test_history'])[:,1],
+            fig.add_trace(go.Scatter(x = np.array(Results[3].additional_information['test_history'])[:,0]-1,
+                                    y = np.array(Results[3].additional_information['test_history'])[:,1],
                                     name = key+' Test', 
                                     mode='lines',
                                     line = dict(color=ESTIMATOR_COLORS[key],
@@ -53,110 +61,139 @@ def plotMcAlester(data_dict,path_to_artifact):
                         #             y=0.35,
                         #             xanchor="left",
                         #             x=0.01,),
-                        font=dict(size=40),)
+                        font=dict(size=12),)
     fig.update_xaxes(mirror=True,
                         ticks='outside',
                         showline=True,
                         linecolor='black',
-                        gridcolor='lightgrey')
+                        gridcolor='lightgrey',
+                        automargin=True)
     fig.update_yaxes(mirror=True,
                         ticks='outside',
                         showline=True,
                         linecolor='black',
-                        gridcolor='lightgrey')
-    fig.write_image(path_to_artifact+'.pdf')
+                        gridcolor='lightgrey',
+                        automargin=True)
+    # fig.tight_layout()
     fig.show()
-    print("Done.")
-
-def plotBMI(data_dict,path_to_artifact):
-    means = np.zeros((len(data_dict['task_list']),len(data_dict['method_names'])))
-    data_dict['method_names'].reverse()
-    for i, method in enumerate(data_dict['method_names']):
-        for j, task in enumerate(data_dict['task_list']):
-            means[j, i] = format(np.mean(data_dict['task_data'][j][method]),'.2f')
-
-    # Add a row for true values
-    true_values = np.array([format(data_dict['task_data'][i][task],'.2f') for i, task in enumerate(data_dict['task_list'])])
-    means = np.hstack((means,true_values.reshape(-1,1)))
-    Methods = data_dict['method_names']
-    Methods.append('True')
-
-    # Define layout
-    fig = go.Figure(data=[go.Table(#values=[Methods] + [means[j] for j in range(len(data_dict['task_list']))]
-        cells=dict(values = means,
-                fill_color='lavender',
-                align='left'))
-    ])
-
-    # Define layout
-    fig.update_layout(
-                    autosize=True,
-                    )
-    fig.for_each_trace(lambda t: t.update(header_fill_color = 'rgba(0,0,0,0)'))
-    # Create annotations for rotated method names (column headers)
-    annotations = []
-    col_title = ['']+data_dict['task_list']
-    for i, task in enumerate(col_title):
-        x = i / (len(col_title))  # Normalize positions
-        y = .55
-        annotations.append(
-            go.layout.Annotation(
-                x=x,
-                y=y,
-                text=task,
-                showarrow=False,
-                textangle=305,
-                xanchor="center",
-                font=dict(
-                    size=12,
-                )
-            )
-        )
-    row_title = ['']+Methods    
-    for i, method in enumerate(row_title):
-        x = -.01  # Normalize positions
-        y = 1-i / (4.85*len(row_title))
-        annotations.append(
-            go.layout.Annotation(
-                x=x,
-                y=y,
-                text=method,
-                showarrow=False,
-                textangle=0,
-                xanchor="center",
-                font=dict(
-                    size=12,
-                )
-            )
-        )
-
-    # Add created annotations and update layout
-    fig.update_layout(annotations=annotations, margin=dict(t=0, b=0,l=50,r=0))#
-
-    fig.show()
-    #pandas and seaborn
-    print("Done.")
     
+    pio.write_image(fig,path_to_artifact+'.pdf')
+    print("Done.")
 
-def main(path_to_artifact):
+def plotBMI(path_to_artifact):
+    data_mean = {}
+    data_std = {}
+    data_mean_err = {}
+    data_mean_rel_err = {}
+    data_mean_end = {}
+    meta_file = path_to_artifact + '/meta'
+    with open(meta_file , "rb") as input_file:
+        meta_dict = pickle.load(input_file)
+    for i in range(len(meta_dict['task_list'])):# × 
+        task_name = bmi.benchmark.BENCHMARK_TASKS[meta_dict['task_list'][i]].name
+        task_file = path_to_artifact + '/' +task_name
+        if os.path.exists(task_file):
+            with open(task_file , "rb") as input_file:
+                task_dict = pickle.load(input_file)
+            task_mean = {}
+            task_std = {}
+            task_mean_err = {}
+            task_mean_rel_err = {}
+            task_mean_end = {}
+            task_mean['True MI'] = task_dict[meta_dict['task_list'][i]]
+            task_std['True MI'] = 0
+            task_mean_err['True MI'] = 0
+            task_mean_rel_err['True MI'] = 0
+            task_mean_end['True MI'] = task_dict[meta_dict['task_list'][i]]
+            for j, method_name in enumerate(meta_dict['method_names']):
+                if method_name in ['CCA','KSG']:
+                    task_mean[method_name] = np.mean(task_dict[method_name])
+                    task_std[method_name] = np.std(task_dict[method_name])
+                    task_mean_err[method_name] = np.mean(task_dict[method_name]) - task_dict[meta_dict['task_list'][i]]
+                    task_mean_rel_err[method_name] = (np.mean(task_dict[method_name]) - task_dict[meta_dict['task_list'][i]])/task_dict[meta_dict['task_list'][i]]
+                    task_mean_end[method_name] = np.mean(task_dict[method_name])
+                elif method_name in ['MPGauss']:
+                    max_mi_est = []
+                    for k in range(len(task_dict[method_name])):
+                        max_mi_est.append(task_dict[method_name][k].mi_estimate)
+                    task_mean[method_name] = np.mean(max_mi_est)
+                    task_std[method_name] = np.std(max_mi_est)
+                    task_mean_err[method_name] = np.mean(max_mi_est) - task_dict[meta_dict['task_list'][i]]
+                    task_mean_rel_err[method_name] = (np.mean(max_mi_est) - task_dict[meta_dict['task_list'][i]])/task_dict[meta_dict['task_list'][i]]
+                    task_mean_end[method_name] = np.mean(max_mi_est)
+                elif method_name in ['FlowMP']:
+                    max_mi_est = []
+                    end_mi_est = []
+                    for k in range(len(task_dict[method_name])):
+                        max_mi_est.append(task_dict[method_name][k].mi_estimate)
+                        end_mi_est.append(task_dict[method_name][0].additional_information['test_history'][-1][1])
+                    task_mean[method_name] = np.mean(end_mi_est)
+                    task_std[method_name] = np.std(max_mi_est)
+                    task_mean_err[method_name] = (np.mean(end_mi_est) - task_dict[meta_dict['task_list'][i]])
+                    task_mean_rel_err[method_name] = (np.mean(end_mi_est) - task_dict[meta_dict['task_list'][i]])/task_dict[meta_dict['task_list'][i]]
+                    task_mean_end[method_name] = np.mean(max_mi_est)      
+                else:
+                    max_mi_est = []
+                    end_mi_est = []
+                    for k in range(len(task_dict[method_name])):
+                        max_mi_est.append(task_dict[method_name][k].mi_estimate)
+                        end_mi_est.append(task_dict[method_name][0].additional_information['test_history'][-1][1])
+                    task_mean[method_name] = np.mean(max_mi_est)
+                    task_std[method_name] = np.std(max_mi_est)
+                    task_mean_err[method_name] = (np.mean(max_mi_est) - task_dict[meta_dict['task_list'][i]])
+                    task_mean_rel_err[method_name] = (np.mean(max_mi_est) - task_dict[meta_dict['task_list'][i]])/task_dict[meta_dict['task_list'][i]]
+                    task_mean_end[method_name] = np.mean(end_mi_est)      
+            data_mean[task_name] = task_mean
+            data_std[task_name] = task_std
+            data_mean_err[task_name] = task_mean_err
+            data_mean_rel_err[task_name] = task_mean_rel_err
+            data_mean_end[task_name] = task_mean_end
 
+    df_mean = pd.DataFrame(data_mean)
+    df_mean_err = pd.DataFrame(data_mean_rel_err)        
+    vcenter = 0
+    # vmin, vmax = y.min(), y.max() 
+    normalize = mcolors.TwoSlopeNorm(vcenter=vcenter, vmin=df_mean_err.min().min(), vmax=df_mean_err.max().max())
+    colormap = cm.seismic#cm.bwr
+    
+    ax = sns.heatmap(data=df_mean_err, annot=df_mean,norm=normalize, cmap=colormap, cbar=False, fmt=".2f", xticklabels=True, yticklabels=True)#, annot=True
+    ax.set(xlabel="", ylabel="")
+    loc, labels = plt.xticks()
+    ax.set_xticklabels(labels, rotation=60,ha='right')#
+    ax.figure.tight_layout()
+    # plt.xticks(rotation=30)
+    plt.show()
+    # first = path_to_artifact.index('/')+1
+    # second = path_to_artifact.index('/',first,len(path_to_artifact))
+    # plot_name = path_to_artifact[second+1:]
+    plt.savefig(path_to_artifact+'/plot_2.pdf')
+    print("Done.")
+
+def plotLocationFinding(path_to_artifact):
     with open(path_to_artifact, "rb") as input_file:
         data_dict = pickle.load(input_file)
+    test = 10
+
+def main(path_to_artifact):
+    fig = go.Figure(go.Scatter(x=[0, 1, 2, 3, 4], y=[0, 1, 4, 9, 16]))
+    # fig.show()
+    # fig.write_image("random.pdf")
     first = path_to_artifact.index('/')+1
     second = path_to_artifact.index('/',first,len(path_to_artifact))
     experiment_name = path_to_artifact[first:second]
     if experiment_name == 'BMI':
-        plotBMI(data_dict,path_to_artifact)
+        plotBMI(path_to_artifact)
     # if data_dict["Experiment"][0] == "McAllester_experiment":
     if experiment_name == 'LargeMI':
-        plotMcAlester(data_dict,path_to_artifact)
+        plotMcAlester(path_to_artifact)
     if experiment_name == 'loc_fin':
-        print("not yet implimented")
+        plotLocationFinding(path_to_artifact)
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluation")
-    parser.add_argument("--path-to-artifact", default="experiment_outputs/BMI/20240130012752", type=str)
-    #McAllester HPC: experiment_outputs/LargeMI/20240130210847
+    parser.add_argument("--path-to-artifact", default="experiment_outputs/BMI/20240214152249", type=str)
+    # McAllester HPC: "experiment_outputs/LargeMI/20240130210847"
+    # BMI HPC: "experiment_outputs/BMI/20240214152249"
     args = parser.parse_args()
 
     main(path_to_artifact=args.path_to_artifact)

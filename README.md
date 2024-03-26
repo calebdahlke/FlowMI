@@ -21,6 +21,7 @@ pip install pydantic
 pip install tensorflow-probability
 pip install plotly
 pip install kaleido
+pip install seaborn
 ```
 
 ## Requirements for Sequential Design Experiments

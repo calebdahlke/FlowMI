@@ -156,7 +156,7 @@ def main_loop(
     prior = torch.distributions.MultivariateNormal(theta_loc, theta_covmat)
 
     # sample true param
-    true_theta = prior.sample(torch.Size([1]))
+    true_theta = torch.tensor([[[-0.3281,  0.2271], [-0.0320,  0.9442]]], device=device)#prior.sample(torch.Size([1]))
 
     designs_so_far = []
     observations_so_far = []
@@ -189,13 +189,15 @@ def main_loop(
             posterior_loc.detach(),
             posterior_scale.detach(),
         )
-        print(true_theta)#flow_theta.reverse
-        print(posterior_loc)
+        # print(true_theta)#flow_theta.reverse
+        # print(posterior_loc)
         designs_so_far.append(design[0])
         observations_so_far.append(observation[0])
+        print(designs_so_far)
+        print(observations_so_far)
 
-    print(f"Fitted posterior: mean = {posterior_loc}, sd = {posterior_scale}")
-    print("True theta = ", true_theta.reshape(-1))
+        print(f"Fitted posterior: mean = {posterior_loc}, sd = {posterior_scale}")
+        print("True theta = ", true_theta.reshape(-1))
 
     data_dict = {}
     for i, xi in enumerate(designs_so_far):
@@ -286,13 +288,13 @@ if __name__ == "__main__":
         "--num-histories", help="Number of histories/rollouts", default=1, type=int#128
     )
     parser.add_argument("--num-experiments", default=10, type=int)  # == T
-    parser.add_argument("--batch-size", default=256, type=int)#1024
-    parser.add_argument("--device", default="cpu", type=str)#"cuda"
+    parser.add_argument("--batch-size", default=1024, type=int)#1024
+    parser.add_argument("--device", default="cuda", type=str)#"cuda"
     parser.add_argument(
         "--mlflow-experiment-name", default="locfin_variational", type=str
     )
     parser.add_argument("--lr", default=0.005, type=float)
-    parser.add_argument("--num-steps", default=2000, type=int)#5000
+    parser.add_argument("--num-steps", default=5000, type=int)#5000
 
     args = parser.parse_args()
 

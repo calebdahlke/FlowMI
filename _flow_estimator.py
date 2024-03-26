@@ -676,11 +676,11 @@ class FlowMargPostEstimator(IMutualInformationPointEstimator):
         train_test_split: Optional[float] = _estimators._DEFAULT_TRAIN_TEST_SPLIT,
         test_every_n_steps: int = _estimators._DEFAULT_TEST_EVERY_N,
         learning_rate: float = _estimators._DEFAULT_LEARNING_RATE,
-        flow_layers: int = 4,
-        nn_width: int = 50,
-        nn_depth: int = 1,
-        knots: int = 8,
-        interval: int = 4,
+        flow_layers: int = 8,#8
+        nn_width: int = 64,#64
+        nn_depth: int = 1,#1
+        knots: int = 8,#8
+        interval: int = 4,#4
         standardize: bool = _estimators._DEFAULT_STANDARDIZE,
         verbose: bool = _estimators._DEFAULT_VERBOSE,
         seed: int = _estimators._DEFAULT_SEED,
@@ -780,7 +780,7 @@ class FlowPostEstimator(IMutualInformationPointEstimator):
         train_test_split: Optional[float] = _estimators._DEFAULT_TRAIN_TEST_SPLIT,
         test_every_n_steps: int = _estimators._DEFAULT_TEST_EVERY_N,
         learning_rate: float = _estimators._DEFAULT_LEARNING_RATE,
-        flow_layers: int = 8,
+        flow_layers: int = 2,
         nn_width: int = 50,
         nn_depth: int = 1,
         knots: int = 8,
@@ -928,10 +928,10 @@ class MargPostEstimator(IMutualInformationPointEstimator):
         )
 
         data = {}
-        data['x_train'] = xs_train
-        data['y_train'] = ys_train
-        data['x_test'] = xs_test
-        data['y_test'] = ys_test
+        # data['x_train'] = xs_train
+        # data['y_train'] = ys_train
+        # data['x_test'] = xs_test
+        # data['y_test'] = ys_test
         
         XY = np.concatenate((xs_train, ys_train), axis=1)
         Sigma = np.cov(XY.T)

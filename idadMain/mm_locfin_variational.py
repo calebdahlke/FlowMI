@@ -3,44 +3,20 @@ import pickle
 import argparse
 import time
 import torch
-from torch import nn
-# from pyro.infer.util import torch_item
 import pyro
-import pyro.distributions as dist
 from tqdm import trange
 import mlflow
 import copy
-from pyro.nn import AutoRegressiveNN
-from neural.baselines import BatchDesignBaseline#, DesignBaseline
+from neural.baselines import BatchDesignBaseline
 
 from experiment_tools.pyro_tools import auto_seed
 from oed.design import OED
 
-from pyro import poutine
-from pyro.poutine.util import prune_subsample_sites
-
 from joblib import Parallel, delayed
 
-# import datetime
-# import math
-# import subprocess
-# from functools import lru_cache
-# import time
-
-# from torch.distributions import constraints
-# from torch.distributions import transform_to
-
-# import pyro.contrib.gp as gp
-# from pyro.contrib.util import rmv
-
-import pyro.distributions.transforms as T
-
-
-# from pyro.util import torch_isnan, torch_isinf
-# def is_bad(a):
-#     return torch_isnan(a) or torch_isinf(a)
 from simulations import HiddenObjectsVar
-from flow_estimator_pyro import MomentMatchMarginalPosterior,SplineFlow, IdentityTransform, RealNVP
+from flow_estimator_pyro import MomentMatchMarginalPosterior,SplineFlow, IdentityTransform, InitFlowToIdentity
+from eval_sPCE_from_source import eval_from_source
 
 def optimise_design(
     posterior_loc,
@@ -56,14 +32,16 @@ def optimise_design(
     device,
     batch_size,
     num_steps,
-    lr,
+    lr_design,
+    lr_flow,
     annealing_scheme=None,
 ):
-    design_init = (
-        torch.distributions.Normal(0.0, 0.01)
-        if experiment_number == 0
-        else torch.distributions.Normal(0.0, 1.0)
-    )
+    # design_init = (
+    #     torch.distributions.Normal(0.0, 0.01)
+    #     if experiment_number == 0
+    #     else torch.distributions.Normal(0.0, 1.0)
+    # )
+    design_init = torch.distributions.Normal(0.0, 0.01)#1.0)#
     design_net = BatchDesignBaseline(
         T=1, design_dim=(1, p), design_init=design_init
     ).to(device)
@@ -84,13 +62,23 @@ def optimise_design(
         dim_x = num_sources*p
         dim_y = 1
         if flow_theta == None:
-            fX = SplineFlow(dim_x, count_bins=8, bounds=5, device=device).to(device)
-            # fX = RealNVP(dim_x, num_blocks=3, dim_hidden=hidden//2,device=device).to(device)
+            # flowx_loss = torch.tensor(torch.nan)
+            # init_lr_x = .005
+            # while torch.isnan(flowx_loss):
+            #     fX = SplineFlow(dim_x,n_flows=1,hidden_dims=[64], count_bins=128, bounds=6,order = 'quadratic', device=device)
+            #     fX, flowx_loss= InitFlowToIdentity(dim_x, fX, bounds=6,lr=init_lr_x,device=device)
+            #     init_lr_x *= .5
+            fX = SplineFlow(dim_x,n_flows=1,hidden_dims=[64], count_bins=128, bounds=6,order = 'quadratic', device=device)
         else:
             fX = copy.deepcopy(flow_theta)
         if flow_obs == None:
-            gY = SplineFlow(dim_y, count_bins=8, bounds=5, device=device).to(device)
-            # gY = RealNVP(dim_y, num_blocks=3, dim_hidden=hidden//2,device=device).to(device)
+            # flowy_loss = torch.tensor(torch.nan)
+            # init_lr_y = .005
+            # while torch.isnan(flowy_loss):
+            #     gY = SplineFlow(dim_y,count_bins=128, bounds=5,order = 'quadratic', device=device)
+            #     gY, flowy_loss = InitFlowToIdentity(dim_y, gY, bounds=5,lr=init_lr_y,device=device)
+            #     init_lr_y *= .5
+            gY = SplineFlow(dim_y,count_bins=128, bounds=5,order = 'quadratic', device=device)
         else:
             gY = copy.deepcopy(flow_obs)
     else:
@@ -108,44 +96,68 @@ def optimise_design(
         device=device
     )
     
+    def separate_learning_rate(module_name, param_name):
+        if module_name == "design_net":
+            return {"lr": lr_design}
+        else:
+            return {"lr": lr_flow}
+    
     ### Set-up optimiser ###
     optimizer = torch.optim.Adam
-    # Annealed LR. Set gamma=1 if no annealing required
-    annealing_freq, patience, factor = annealing_scheme
-    scheduler = pyro.optim.ReduceLROnPlateau(
+    annealing_freq, factor = annealing_scheme
+    scheduler = pyro.optim.ExponentialLR(
         {
             "optimizer": optimizer,
-            "optim_args": {"lr": lr},
-            "factor": factor,
-            "patience": patience,
+            "optim_args": separate_learning_rate,
+            "gamma" : factor,
             "verbose": False,
         }
     )
+    # patience = 1
+    # scheduler = pyro.optim.ReduceLROnPlateau(
+    #     {
+    #         "optimizer": optimizer,
+    #         "optim_args": separate_learning_rate,#:{"lr": lr},
+    #         "factor": factor,
+    #         "patience": patience,
+    #         "verbose": False,
+    #     }
+    # )
+
     oed = OED(optim=scheduler, loss=mi_loss_instance)
     
     ### Optimise ###
+    design_prev = 1*design_net.designs[0]
+    j=0
     loss_history = []
     num_steps_range = trange(0, num_steps + 0, desc="Loss: 0.000 ")
     for i in num_steps_range:
         loss = oed.step()
-        # Log every 100 losses -> too slow (and unnecessary to log everything)
         if i % 100 == 0:
-            num_steps_range.set_description("Loss: {:.3f} ".format(loss))#mi_loss_instance.loss().detach().numpy()[0]
+            num_steps_range.set_description("Loss: {:.3f} ".format(loss))
             loss_eval = oed.evaluate_loss()
-            # mlflow.log_metric(f"loss_{experiment_number}", loss_eval, step=i)
+            loss_history.append(loss_eval)
 
-        # Check if lr should be decreased every 200 steps.
-        # patience=5 so annealing occurs at most every 1.2K steps
-        if i % annealing_freq == 0:
-            scheduler.step(loss_eval)
-            # store design paths
+        if i % annealing_freq == 0 and not i == 0:
+            scheduler.step()
+            # scheduler.step(loss_eval)
+        if i % 500 ==0 and not i == 0:
+            with torch.no_grad():
+                design_current = design_net.designs[0]
+                design_diff = torch.max((design_current-design_prev).pow(2).sum(axis=1).pow(.5))
+                if design_diff < 1e-1:
+                    j+=1
+                    if j>=3:
+                        break
+                else:
+                    design_prev = 1*design_current
+                    j=0
 
-    return ho_model, mi_loss_instance
-
+    return ho_model, mi_loss_instance, loss_history
 
 def main_loop(
-    run,  # number of rollouts
-    mlflow_run_id,
+    run,
+    path_to_extra_data,
     device,
     T,
     train_flow_every_step,
@@ -155,7 +167,8 @@ def main_loop(
     p,
     batch_size,
     num_steps,
-    lr,
+    lr_design,
+    lr_flow,
     annealing_scheme,
 ):
     pyro.clear_param_store()
@@ -167,15 +180,7 @@ def main_loop(
     prior = torch.distributions.MultivariateNormal(theta_loc, theta_covmat)
 
     # sample true param
-    true_theta = prior.sample(torch.Size([1]))
-    time_per_design = []
-    # flow_dist_so_far = []
-    mus_so_far = []
-    sigmas_so_far = []
-    flow_theta_so_far = []
-    flow_obs_so_far = []
-    posterior_loc_so_far = []
-    posterior_cov_so_far = []
+    true_theta = torch.tensor([[[-0.3281,  0.2271, -0.0320,  0.9442]]], device=device)#prior.sample(torch.Size([1]))#torch.tensor([[[-0.9634,  1.1414,  0.1810,  1.3536]]], device=device)#
     designs_so_far = []
     observations_so_far = []
 
@@ -187,7 +192,7 @@ def main_loop(
         t_start = time.time()
         print(f"Step {t + 1}/{T} of Run {run + 1}")
         pyro.clear_param_store()
-        ho_model, mi_loss_instance = optimise_design(
+        ho_model, mi_loss_instance, loss_history = optimise_design(
             posterior_loc,
             posterior_cov,
             flow_theta,
@@ -201,14 +206,12 @@ def main_loop(
             device=device,
             batch_size=batch_size,
             num_steps=num_steps,
-            lr=lr,
+            lr_design=lr_design,
+            lr_flow=lr_flow,
             annealing_scheme=annealing_scheme,
         )
         
-        
-        ################################ CHECK ON THESE ###################################################
         with torch.no_grad():
-            
             if t>0:
                 trans_true_theta,_ = flow_theta.forward(true_theta[0])
             else:
@@ -222,30 +225,58 @@ def main_loop(
             obs, _ = mi_loss_instance.gY.forward(observation[0])
             posterior_loc = (mux + torch.matmul(Sigmaxy,torch.linalg.solve(Sigmayy,(obs-muy))).flatten())
             max_posterior = mi_loss_instance.fX.reverse(posterior_loc)
-            # print(true_theta)
-            # print(posterior_loc)
-            # print(mi_loss_instance.fX.reverse(posterior_loc))
             posterior_cov = Sigmaxx-torch.matmul(Sigmaxy,torch.linalg.solve(Sigmayy,Sigmaxy.T))
             flow_theta = mi_loss_instance.fX
             flow_obs = mi_loss_instance.gY
+            
+            # import numpy as np
+            # import scipy
+            # from matplotlib.pyplot import colorbar, pcolor, show, scatter
+            # x = np.linspace(-3.5,3.5,100)
+            # y = np.linspace(-3.5,3.5,100)
+            # X, Y = np.meshgrid(x, y)
+            # fX, logJac = flow_theta.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),true_theta[0][0][2].cpu().numpy()*np.ones(np.shape(X.flatten())),true_theta[0][0][3].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
+            # points = fX.reshape((100,100,4))
+            # Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mux.cpu().numpy(), Sigmaxx.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+            # pcolor(X, Y, Z)
+            # scatter(true_theta[0][0][2].cpu().numpy(),true_theta[0][0][3].cpu().numpy(), color='red', marker='x',label = 'True')
+            # show()
+            
         t_end = time.time()
         run_time = t_end-t_start
 
-        
-        mus_so_far.append(mi_loss_instance.mu.detach().clone().cpu().numpy())
-        sigmas_so_far.append(mi_loss_instance.Sigma.detach().clone().cpu().numpy())
-        flow_theta_so_far.append(copy.deepcopy(mi_loss_instance.fX).cpu())
-        flow_obs_so_far.append(copy.deepcopy(mi_loss_instance.gY).cpu())
-
-        posterior_loc_so_far.append(posterior_loc.cpu().numpy())
-        posterior_cov_so_far.append(posterior_cov.cpu().numpy())
-        time_per_design.append(run_time)
         designs_so_far.append(design[0].detach().clone().cpu())
         observations_so_far.append(observation[0].cpu())
+        
+        # extra_data = {}
+        # extra_data["mu"] = mi_loss_instance.mu.detach().clone().cpu().numpy()
+        # extra_data["sigmas"] = mi_loss_instance.Sigma.detach().clone().cpu().numpy()
+        # extra_data["flow_theta"] = copy.deepcopy(mi_loss_instance.fX).cpu()
+        # extra_data["flow_obs"] = copy.deepcopy(mi_loss_instance.gY).cpu()
+        # extra_data["posterior_loc"] = posterior_loc.cpu().numpy()
+        # extra_data["posterior_cov"] = posterior_cov.cpu().numpy()
+        # extra_data["total_time"] = run_time
+        # extra_data["design"] = design[0].detach().clone().cpu()
+        # extra_data["observations"] = observation[0].cpu()
+        
+        # path_to_run = path_to_extra_data + '/Run{}'.format(run)
+        # path_to_step = path_to_run + '/Step{}.pickle'.format(t)
+        # path_to_loss = path_to_run +'/Loss{}.pickle'.format(t)
+        # if not os.path.exists(path_to_run):
+        #     os.makedirs(path_to_run)
+        # with open(path_to_step, "wb") as f:
+        #     pickle.dump(extra_data, f)
+        # with open(path_to_loss, "wb") as f:
+        #     pickle.dump(loss_history, f)
+        # del extra_data
+        
         if not train_flow_every_step:
             train_flow = False
 
-    print(f"Fitted posterior: mean = {posterior_loc}, cov = {posterior_cov}")
+        print(designs_so_far)
+        print(observations_so_far)
+    print(f"Fit mean  = {max_posterior}")
+    print(f"Fitted posterior: mean = {max_posterior}, cov = {posterior_cov}")
     print("True theta = ", true_theta.reshape(-1))
 
     data_dict = {}
@@ -254,25 +285,15 @@ def main_loop(
     for i, y in enumerate(observations_so_far):
         data_dict[f"y{i + 1}"] = y.cpu()
     data_dict["theta"] = true_theta.reshape((num_sources, p)).cpu()
-    
-    extra_data = {}
-    extra_data["mu"] = mus_so_far
-    extra_data["sigmas"] = sigmas_so_far
-    extra_data["flow_theta"] = flow_theta_so_far
-    extra_data["flow_obs"] = flow_obs_so_far
-    extra_data["posterior_loc"] = posterior_loc_so_far
-    extra_data["posterior_cov"] = posterior_cov_so_far
-    extra_data["design_time"] = time_per_design
-    extra_data["designs"] = designs_so_far
-    extra_data["observations"] = observations_so_far
 
-    return [data_dict, extra_data]
+    return data_dict
 
 
 def main(
     seed,
     mlflow_experiment_name,
     num_histories,
+    num_parallel,
     device,
     T,
     train_flow_every_step,
@@ -282,7 +303,9 @@ def main(
     noise_scale,
     batch_size,
     num_steps,
-    lr,
+    lr_design,
+    lr_flow,
+    annealing_scheme,
 ):
     pyro.clear_param_store()
     seed = auto_seed(seed)
@@ -293,12 +316,12 @@ def main(
     mlflow.log_param("seed", seed)
     mlflow.log_param("p", p)
     mlflow.log_param("num_steps", num_steps)
-    mlflow.log_param("lr", lr)
+    mlflow.log_param("lr_design", lr_design)
+    mlflow.log_param("lr_flow", lr_flow)
     mlflow.log_param("num_histories", num_histories)
     mlflow.log_param("num_experiments", T)
     mlflow.log_param("noise_scale", noise_scale)
     mlflow.log_param("num_sources", num_sources)
-    annealing_scheme = [100, 5, 0.8]
     mlflow.log_param("annealing_scheme", str(annealing_scheme))
 
     meta = {
@@ -308,22 +331,18 @@ def main(
         "noise_scale": noise_scale,
         "num_histories": num_histories,
     }
-    extra_meta = {
-        "model": "location_finding",
-        "p": p,
-        "K": num_sources,
-        "noise_scale": noise_scale,
-        "num_histories": num_histories,
-        "train_flow_every_step": train_flow_every_step,
-        "run_flow": run_flow,
-        "seed": seed
-    }
+    
+    t = time.localtime()
+    extra_data_id = time.strftime("%Y%m%d%H%M%S", t)
+    path_to_extra_data = "./experiment_outputs/loc_fin/{}".format(extra_data_id)
+    # if not os.path.exists(path_to_extra_data):
+    #     os.makedirs(path_to_extra_data)
+    # print(path_to_extra_data)
 
     results_vi = {"loop": [], "seed": seed, "meta": meta}
-    extra_vi = {"loop":[],"meta":extra_meta}
     
-    results = Parallel(n_jobs=num_histories)(delayed(main_loop)(run=i,
-                            mlflow_run_id=mlflow.active_run().info.run_id,
+    results = Parallel(n_jobs=num_parallel)(delayed(main_loop)(run=i,
+                            path_to_extra_data =path_to_extra_data,
                             device=device,
                             T=T,
                             train_flow_every_step=train_flow_every_step,
@@ -333,52 +352,46 @@ def main(
                             p=p,
                             batch_size=batch_size,
                             num_steps=num_steps,
-                            lr=lr,
+                            lr_design=lr_design,
+                            lr_flow=lr_flow,
                             annealing_scheme=annealing_scheme,
                         ) for i in range(num_histories))
     for i in range(num_histories):
-        results_vi["loop"].append(results[i][0])
-        extra_vi["loop"].append(results[i][1])
-    
-    # for i in range(num_histories):
-    #     results = main_loop(
-    #         run=i,
-    #         mlflow_run_id=mlflow.active_run().info.run_id,
-    #         device=device,
-    #         T=T,
-    #         train_flow_every_step=train_flow_every_step,
-    #         run_flow=run_flow,
-    #         noise_scale=noise_scale,
-    #         num_sources=num_sources,
-    #         p=p,
-    #         batch_size=batch_size,
-    #         num_steps=num_steps,
-    #         lr=lr,
-    #         annealing_scheme=annealing_scheme,
-    #     )
-    #     results_vi["loop"].append(results[0])
-    #     extra_vi["loop"].append(results[1])
+        results_vi["loop"].append(results[i])
 
-    # Log the results dict as an artifact
     if not os.path.exists("./mlflow_outputs"):
         os.makedirs("./mlflow_outputs")
     with open("./mlflow_outputs/results_locfin_mm_vi.pickle", "wb") as f:
         pickle.dump(results_vi, f)
     mlflow.log_artifact("mlflow_outputs/results_locfin_mm_vi.pickle")
-    print("Done.")
+    
     ml_info = mlflow.active_run().info
     path_to_artifact = "mlruns/{}/{}/artifacts/results_locfin_mm_vi.pickle".format(
         ml_info.experiment_id, ml_info.run_id
     )
+    with open("./"+path_to_artifact, "wb") as f:
+        pickle.dump(results_vi, f)
     print("Path to artifact - use this when evaluating:\n", path_to_artifact)
     
-    t = time.localtime()
-    run_id = time.strftime("%Y%m%d%H%M%S", t)
-    path_to_artifact = "./experiment_outputs/loc_fin/{}".format(run_id)
-    if not os.path.exists("./experiment_outputs/loc_fin"):
-        os.makedirs("./experiment_outputs/loc_fin")
-    with open(path_to_artifact, "wb") as f:
-        pickle.dump(extra_vi, f)
+    # extra_meta = {
+    #     "train_flow_every_step": train_flow_every_step,
+    #     "run_flow": run_flow,
+    #     "ml_experiment_id":ml_info.experiment_id,
+    #     "ml_run_id":ml_info.run_id
+    # }
+    # path_to_extra_meta =path_to_extra_data + '/extra_meta.pickle'
+    # with open(path_to_extra_meta, "wb") as f:
+    #     pickle.dump(extra_meta, f)
+    # print(path_to_extra_data)
+    print("Done.")
+    print("Evaluating Results")
+    eval_from_source(
+        path_to_artifact=path_to_artifact,
+        num_experiments_to_perform=[T],
+        num_inner_samples=int(5e5),
+        seed=-1,
+        device='cpu',
+    )
     # --------------------------------------------------------------------------
 
 
@@ -389,34 +402,40 @@ if __name__ == "__main__":
     parser.add_argument("--seed", default=-1, type=int)
     parser.add_argument("--physical-dim", default=2, type=int)
     parser.add_argument(
-        "--num-histories", help="Number of histories/rollouts", default=2, type=int#128
+        "--num-histories", help="Number of histories/rollouts", default=1, type=int
     )
-    parser.add_argument("--num-experiments", default=2, type=int)  # 10
-    parser.add_argument("--batch-size", default=256, type=int)#512,1024
-    parser.add_argument("--device", default="cuda", type=str)#"cuda""cpu"
+    parser.add_argument(
+        "--num-parallel", help="Number of histories to run parallel", default=1, type=int
+    )
+    parser.add_argument("--num-experiments", default=10, type=int)
+    parser.add_argument("--batch-size", default=1024, type=int)
+    parser.add_argument("--device", default="cuda", type=str)
     parser.add_argument(
         "--mlflow-experiment-name", default="locfin_mm_variational", type=str
     )
-    parser.add_argument("--lr", default=0.005, type=float)#0.005
-    parser.add_argument("--num-steps", default=500, type=int)#
-    parser.add_argument("--train-flow-every-step", default=False, type=bool)
+    parser.add_argument("--lr-design", default=.00005, type=float)
+    parser.add_argument("--lr-flow", default=.005, type=float)
+    parser.add_argument("--annealing-scheme", nargs="+", default=[250,.8], type=float)
+    parser.add_argument("--num-steps", default=5000, type=int)
+    parser.add_argument("--train-flow-every-step", default=True, type=bool)
     parser.add_argument("--run-flow", default=True, type=bool)
     
     args = parser.parse_args()
-
     main(
         seed=args.seed,
         mlflow_experiment_name=args.mlflow_experiment_name,
         num_histories=args.num_histories,
+        num_parallel=args.num_parallel,
         device=args.device,
         T=args.num_experiments,
         train_flow_every_step= args.train_flow_every_step,
         run_flow = args.run_flow,
         p=args.physical_dim,
         num_sources=2,
-        noise_scale=0.5,
+        noise_scale=0.5,#0.00001,#
         batch_size=args.batch_size,
         num_steps=args.num_steps,
-        lr=args.lr,
+        lr_design=args.lr_design,
+        lr_flow=args.lr_flow,
+        annealing_scheme = args.annealing_scheme,
     )
-

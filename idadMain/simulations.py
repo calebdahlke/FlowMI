@@ -42,6 +42,9 @@ class HiddenObjectsVar(nn.Module):
         self.theta_prior = dist.MultivariateNormal(
             self.theta_loc, self.theta_covmat
         )
+        # self.theta_prior = dist.MultivariateNormal(
+        #     self.theta_loc, self.theta_covmat
+        # ) if isinstance(self.flow_theta, IdentityTransform) else dist.TransformedDistribution(dist.MultivariateNormal(self.theta_loc, self.theta_covmat), self.flow_theta.spline_transform.inv)
         # Observations noise scale:
         self.noise_scale = noise_scale if noise_scale is not None else torch.tensor(1.0)
         self.n = 1  # samples per design=1
@@ -65,13 +68,19 @@ class HiddenObjectsVar(nn.Module):
         if hasattr(self.design_net, "parameters"):
             #! this is required for the pyro optimizer
             pyro.module("design_net", self.design_net)
-
+        
         ########################################################################
         # Sample latent variables theta
         ########################################################################
-        theta = latent_sample("theta", self.theta_prior)
+        theta1 = latent_sample("theta", self.theta_prior)
+        # theta = theta1
         with torch.no_grad():
-            theta = self.flow_theta.reverse(theta)#.flatten(-1)
+            theta = self.flow_theta.reverse(theta1)#.flatten(-1)
+            if torch.any(theta.isnan()):
+                theta[torch.unique(torch.where(torch.isnan(theta))[0])] = self.flow_theta.reverse(theta1[torch.unique(torch.where(torch.isnan(theta))[0])])
+            if torch.any(theta.isnan()):
+                print('NaN')
+                theta[torch.unique(torch.where(torch.isnan(theta))[0])] = self.flow_theta.reverse(1.0001*theta1[torch.unique(torch.where(torch.isnan(theta))[0])])
         theta = theta.reshape((len(theta),self.K,self.p))
         y_outcomes = []
         xi_designs = []
@@ -84,19 +93,19 @@ class HiddenObjectsVar(nn.Module):
             xi = compute_design(
                 f"xi{t + 1}", self.design_net.lazy(*zip(xi_designs, y_outcomes))
             )
+            # print(xi[0])
             ####################################################################
             # Sample y at xi; shape is [batch size x 1]
             ####################################################################
             mean = self.forward_map(xi, theta)
             sd = self.noise_scale
             y = observation_sample(f"y{t + 1}", dist.Normal(mean, sd).to_event(1))
-
             ####################################################################
             # Update history
             ####################################################################
             y_outcomes.append(y)
             xi_designs.append(xi)
-
+        
         return theta, xi_designs, y_outcomes
 
     def forward(self, theta):

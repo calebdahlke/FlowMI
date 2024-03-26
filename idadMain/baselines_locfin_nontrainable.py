@@ -109,9 +109,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", default=-1, type=int)
     parser.add_argument("--policy", default="random", choices=["random"], type=str)
-    parser.add_argument("--num-experiments-to-perform", nargs="+", default=[5, 10, 20])
+    parser.add_argument("--num-experiments-to-perform", nargs="+", default=[10])#5, 10, 20
     parser.add_argument("--physical-dim", default=2, type=int)
-    parser.add_argument("--device", default="cuda", type=str)
+    parser.add_argument("--device", default="cpu", type=str)#"cuda""cpu"
     args = parser.parse_args()
     args.num_experiments_to_perform = [
         int(x) if x else x for x in args.num_experiments_to_perform
@@ -123,4 +123,5 @@ if __name__ == "__main__":
         policy=args.policy,
         p=args.physical_dim,
         device=args.device,
+        n_rollout=160
     )
