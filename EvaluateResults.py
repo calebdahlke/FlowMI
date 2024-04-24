@@ -11,16 +11,28 @@ import pickle
 import os
 import bmi
 
+# ESTIMATOR_COLORS = {
+#     "TrueMI": "rgba(0,0,0,1.0)", # Black
+#     "FlowP": "rgba(204,0,0,1.0)", # Red
+#     "FlowMP": "rgba(0,0,153,1.0)", # Blue
+#     "MINE": "rgba(0,204,204,1.0)", # Light Blue
+#     "InfoNCE": "rgba(0,153,0,1.0)", # Green
+#     "NWJ": "rgba(255,0,127,1.0)", # Pink
+#     "DV": "rgba(204,102,0,1.0)", # Orange
+#     "KSG": "rgba(102,51,0,1.0)", # Brown
+#     "CCA": "rgba(96,96,96,1.0)", # Grey
+# }
+
 ESTIMATOR_COLORS = {
     "TrueMI": "rgba(0,0,0,1.0)", # Black
-    "FlowP": "rgba(204,0,0,1.0)", # Red
-    "FlowMP": "rgba(0,0,153,1.0)", # Blue
+    "JointGauss": "rgba(204,0,0,1.0)", # Red
+    "NeuralGauss": "rgba(204,102,0,1.0)", # Orange
+    "JointFlow": "rgba(127, 0, 255,1.0)", # Violet
+    "NeuralFlow": "rgba(0,0,153,1.0)", # Blue
     "MINE": "rgba(0,204,204,1.0)", # Light Blue
     "InfoNCE": "rgba(0,153,0,1.0)", # Green
     "NWJ": "rgba(255,0,127,1.0)", # Pink
-    "DV": "rgba(204,102,0,1.0)", # Orange
-    "KSG": "rgba(102,51,0,1.0)", # Brown
-    "CCA": "rgba(96,96,96,1.0)", # Grey
+    "DV": "rgba(102,51,0,1.0)", # Brown
 }
 
 def plotMcAlester(path_to_artifact):
@@ -34,20 +46,28 @@ def plotMcAlester(path_to_artifact):
                                 mode='lines',
                                 line = dict(color=ESTIMATOR_COLORS['TrueMI'],
                                             width = 3)))
+    # for index, key in enumerate(data_dict):
+    #     if key not in ["Experiment","TrueMI","JointGauss"]:
+    #         [Results, best_arg] = data_dict[key] 
+    #         fig.add_trace(go.Scatter(x = np.array(Results[0].additional_information['training_history'])[:,0]-1,#Results[3]
+    #                                 y = np.array(Results[0].additional_information['training_history'])[:,1],#Results[3]
+    #                                 name = key+' Train', 
+    #                                 line = dict(color=ESTIMATOR_COLORS[key][:-4]+"0.5)", # add opacity 
+    #                                             dash = 'dash',
+    #                                             width = 3)))
     for index, key in enumerate(data_dict):
-        if key not in ["Experiment","TrueMI"]:
-            [Results, best_arg] = data_dict[key] 
-            fig.add_trace(go.Scatter(x = np.array(Results[3].additional_information['training_history'])[:,0]-1,
-                                    y = np.array(Results[3].additional_information['training_history'])[:,1],
-                                    name = key+' Train', 
-                                    line = dict(color=ESTIMATOR_COLORS[key][:-4]+"0.5)", # add opacity 
-                                                dash = 'dash',
-                                                width = 3)))
-    for index, key in enumerate(data_dict):
-        if key not in ["Experiment","TrueMI"]:
-            [Results, best_arg] = data_dict[key] 
-            fig.add_trace(go.Scatter(x = np.array(Results[3].additional_information['test_history'])[:,0]-1,
-                                    y = np.array(Results[3].additional_information['test_history'])[:,1],
+        if key in ["JointGauss"]:
+            [Results, best_arg] = data_dict[key]
+            fig.add_trace(go.Scatter(x = np.linspace(0,num_steps-1,num_steps),
+                            y = Results[0].mi_estimate*np.ones(num_steps),
+                            name = key+' Test', 
+                            mode='lines',
+                            line = dict(color=ESTIMATOR_COLORS[key],
+                                        width = 3)))
+        if key not in ["Experiment","TrueMI","JointGauss"]:
+            [Results, best_arg] = data_dict[key]
+            fig.add_trace(go.Scatter(x = np.array(Results[0].additional_information['test_history'])[:,0]-1,#Results[3]
+                                    y = np.array(Results[0].additional_information['test_history'])[:,1],#Results[3]
                                     name = key+' Test', 
                                     mode='lines',
                                     line = dict(color=ESTIMATOR_COLORS[key],
@@ -112,7 +132,7 @@ def plotBMI(path_to_artifact):
                     task_mean_err[method_name] = np.mean(task_dict[method_name]) - task_dict[meta_dict['task_list'][i]]
                     task_mean_rel_err[method_name] = (np.mean(task_dict[method_name]) - task_dict[meta_dict['task_list'][i]])/task_dict[meta_dict['task_list'][i]]
                     task_mean_end[method_name] = np.mean(task_dict[method_name])
-                elif method_name in ['MPGauss']:
+                elif method_name in ['JointGauss']:
                     max_mi_est = []
                     for k in range(len(task_dict[method_name])):
                         max_mi_est.append(task_dict[method_name][k].mi_estimate)
@@ -121,7 +141,7 @@ def plotBMI(path_to_artifact):
                     task_mean_err[method_name] = np.mean(max_mi_est) - task_dict[meta_dict['task_list'][i]]
                     task_mean_rel_err[method_name] = (np.mean(max_mi_est) - task_dict[meta_dict['task_list'][i]])/task_dict[meta_dict['task_list'][i]]
                     task_mean_end[method_name] = np.mean(max_mi_est)
-                elif method_name in ['FlowMP']:
+                elif method_name in ['NeuralGauss','JointFlow','NeuralFlow']:
                     max_mi_est = []
                     end_mi_est = []
                     for k in range(len(task_dict[method_name])):
@@ -162,11 +182,13 @@ def plotBMI(path_to_artifact):
     ax.set_xticklabels(labels, rotation=60,ha='right')#
     ax.figure.tight_layout()
     # plt.xticks(rotation=30)
-    plt.show()
+    # plt.show()
     # first = path_to_artifact.index('/')+1
     # second = path_to_artifact.index('/',first,len(path_to_artifact))
     # plot_name = path_to_artifact[second+1:]
     plt.savefig(path_to_artifact+'/plot_2.pdf')
+    # pio.write_image(ax,path_to_artifact+'/plot_2.pdf')
+    plt.show()
     print("Done.")
 
 def plotLocationFinding(path_to_artifact):
@@ -177,7 +199,7 @@ def plotLocationFinding(path_to_artifact):
 def main(path_to_artifact):
     fig = go.Figure(go.Scatter(x=[0, 1, 2, 3, 4], y=[0, 1, 4, 9, 16]))
     # fig.show()
-    # fig.write_image("random.pdf")
+    fig.write_image("random.pdf")
     first = path_to_artifact.index('/')+1
     second = path_to_artifact.index('/',first,len(path_to_artifact))
     experiment_name = path_to_artifact[first:second]
@@ -191,9 +213,9 @@ def main(path_to_artifact):
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluation")
-    parser.add_argument("--path-to-artifact", default="experiment_outputs/BMI/20240214152249", type=str)
-    # McAllester HPC: "experiment_outputs/LargeMI/20240130210847"
-    # BMI HPC: "experiment_outputs/BMI/20240214152249"
+    parser.add_argument("--path-to-artifact", default="experiment_outputs/BMI/20240423005333", type=str)
+    # McAllester HPC: "experiment_outputs/LargeMI/20240130210847" "experiment_outputs/LargeMI/20240412004044"
+    # BMI HPC: "experiment_outputs/BMI/20240214152249" "experiment_outputs/BMI/20240411215931"
     args = parser.parse_args()
 
     main(path_to_artifact=args.path_to_artifact)

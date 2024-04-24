@@ -17,6 +17,7 @@ import copy
 from simulations import solve_sir_sdes_var, EpidemicVar
 from flow_estimator_pyro import MomentMatchMarginalPosterior, SplineFlow, IdentityTransform, InitFlowToIdentity
 from joblib import Parallel, delayed
+from pyro.infer.util import torch_item
 
 def optimise_design(
     simdata,
@@ -33,8 +34,8 @@ def optimise_design(
     annealing_scheme=None,
 ):
 
-    # design_init = torch.distributions.Uniform(-3.0, 3.0)
-    design_init = torch.distributions.Uniform(-3, -2.9)
+    design_init = torch.distributions.Uniform(-3.0, 3.0)
+    # design_init = torch.distributions.Uniform(-3, -2.9)
     design_net = BatchDesignBaseline(T=1, design_dim=(1, 1), design_init=design_init).to(
         device
     )
@@ -52,15 +53,17 @@ def optimise_design(
         dim_x = 2
         dim_y = 1 ### Try Quadratic and test bin/bound layers try 12
         if flow_theta == None:
-            fX = SplineFlow(dim_x, count_bins=16, bounds=3, device=device).to(device)
-            fX = InitFlowToIdentity(dim_x, fX, bounds = 3, device=device)
+            # fX = SplineFlow(dim_x, count_bins=16, bounds=3, device=device).to(device)
+            # fX = InitFlowToIdentity(dim_x, fX, bounds = 3, device=device)
             # fX = RealNVP(dim_x, num_blocks=3, dim_hidden=hidden//2,device=device).to(device)
+            fX = SplineFlow(dim_x,n_flows=1,hidden_dims=[32], count_bins=128, bounds=4,order = 'quadratic', device=device)
         else:
             fX = copy.deepcopy(flow_theta)
         if flow_obs == None:
-            gY = SplineFlow(dim_y, count_bins=256, bounds=3, device=device).to(device)
-            gY = InitFlowToIdentity(dim_y, gY, bounds = 3, device=device)
+            # gY = SplineFlow(dim_y, count_bins=256, bounds=3, device=device).to(device)
+            # gY = InitFlowToIdentity(dim_y, gY, bounds = 3, device=device)
             # gY = RealNVP(dim_y, num_blocks=3, dim_hidden=hidden//2,device=device).to(device)
+            gY = SplineFlow(dim_y,count_bins=128, bounds=5,order = 'quadratic', device=device)
         else:
             gY = copy.deepcopy(flow_obs)
     else:
@@ -74,43 +77,93 @@ def optimise_design(
         batch_size=batch_size,
         flow_x=fX,
         flow_y=gY,
+        prev_flow_theta = flow_theta,
         train_flow=train_flow,
         device=device
     )
-    def separate_learning_rate(module_name, param_name):
-        if module_name == "design_net":
-            return {"lr": lr_design}
-        else:
-            return {"lr": lr_flow}
+    # def separate_learning_rate(module_name, param_name):
+    #     if module_name == "design_net":
+    #         return {"lr": lr_design}
+    #     else:
+    #         return {"lr": lr_flow}
 
     ### Set-up optimiser ###
-    optimizer = torch.optim.Adam
+    # optimizer = torch.optim.Adam
     
+    # annealing_freq, factor = annealing_scheme
+    
+    # scheduler = pyro.optim.ExponentialLR(
+    #     {
+    #         "optimizer": optimizer,
+    #         "optim_args": separate_learning_rate,#{"lr": lr},
+    #         "gamma" : factor,
+    #         "verbose": False,
+    #     }
+    # )
+    
+    # oed = OED(optim=scheduler, loss=mi_loss_instance)
+    # ### Optimise ###
+    # loss_history = []
+    # num_steps_range = trange(0, num_steps + 0, desc="Loss: 0.000 ")
+    # for i in num_steps_range:
+    #     loss = oed.step()
+    #     # Log every 100 losses -> too slow (and unnecessary to log everything)
+    #     if i % 100 == 0:
+    #         num_steps_range.set_description("Loss: {:.3f} ".format(loss))
+    #         loss_eval = oed.evaluate_loss()
+    #         loss_history.append(loss_eval)
+            
+    #     if i % annealing_freq == 0 and not i == 0:
+    #         scheduler.step()
+    ### Set-up optimiser ###
+    optimizer_design = torch.optim.Adam(epidemic.design_net.designs)
     annealing_freq, factor = annealing_scheme
-    
-    scheduler = pyro.optim.ExponentialLR(
+    scheduler_design = pyro.optim.ExponentialLR(
         {
-            "optimizer": optimizer,
-            "optim_args": separate_learning_rate,#{"lr": lr},
+            "optimizer": optimizer_design,
+            "optim_args": {"lr": lr_design},
             "gamma" : factor,
             "verbose": False,
         }
     )
     
-    oed = OED(optim=scheduler, loss=mi_loss_instance)
-    ### Optimise ###
+    if run_flow and train_flow:
+        optimizer_flow = torch.optim.Adam(list(mi_loss_instance.fX.parameters())+list(mi_loss_instance.gY.parameters()))
+        annealing_freq, factor = annealing_scheme
+        scheduler_flow = pyro.optim.ExponentialLR(
+            {
+                "optimizer": optimizer_flow,
+                "optim_args": {"lr": lr_flow},
+                "gamma" : factor,
+                "verbose": False,
+            }
+        )
+    
     loss_history = []
     num_steps_range = trange(0, num_steps + 0, desc="Loss: 0.000 ")
     for i in num_steps_range:
-        loss = oed.step()
-        # Log every 100 losses -> too slow (and unnecessary to log everything)
-        if i % 100 == 0:
-            num_steps_range.set_description("Loss: {:.3f} ".format(loss))
-            loss_eval = oed.evaluate_loss()
-            loss_history.append(loss_eval)
+        optimizer_design.zero_grad()
+        negMI = mi_loss_instance.differentiable_loss()
+        negMI.backward(retain_graph=True)
+        # torch.nn.utils.clip_grad_norm_(design_net.parameters(), 1.0)
+        optimizer_design.step()
+        if run_flow and train_flow:
+            optimizer_flow.zero_grad()
+            # # Log Likelihood Optimization
+            (mi_loss_instance.hXY).backward()
+            # Foster Bound Optimization
+            # (mi_loss_instance.hX + mi_loss_instance.hXY - mi_loss_instance.hY).backward()
+            # (mi_loss_instance.hX+mi_loss_instance.hY).backward()
+            optimizer_flow.step()
             
+        if i % 100 == 0:
+            num_steps_range.set_description("Loss: {:.3f} ".format(torch_item(negMI)))
+            loss_eval = mi_loss_instance.loss()#*args, **kwargs)
+            loss_history.append(loss_eval)
         if i % annealing_freq == 0 and not i == 0:
-            scheduler.step()
+            scheduler_design.step()
+            if run_flow and train_flow:
+                scheduler_flow.step()
 
     return epidemic, mi_loss_instance, loss_history
 
@@ -163,7 +216,7 @@ def main_loop(
             epidemic._remove_data()
             del SIMDATA
             SIMDATA = solve_sir_sdes_var(
-                num_samples=5000,#100000
+                num_samples=100000,#5000,#100000
                 device=device,
                 grid=10000,#10000
                 save=False,
@@ -359,12 +412,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mlflow-experiment-name", default="epidemic_variational", type=str
     )
-    parser.add_argument("--lr-design", default=0.001, type=float)#0.01
+    parser.add_argument("--lr-design", default=0.005, type=float)#0.01
     parser.add_argument("--lr-flow", default=0.005, type=float)
-    parser.add_argument("--annealing-scheme", nargs="+", default=[500,.75], type=float)
+    parser.add_argument("--annealing-scheme", nargs="+", default=[500,.95], type=float)
     parser.add_argument("--num-steps", default=5000, type=int)#5000
-    parser.add_argument("--train-flow-every-step", default=True, type=bool)
-    parser.add_argument("--run-flow", default=True, type=bool)
+    parser.add_argument("--train-flow-every-step", default=False, type=bool)
+    parser.add_argument("--run-flow", default=False, type=bool)
     
     # parser.add_argument("--true-theta", default=True, type=bool)
     args = parser.parse_args()

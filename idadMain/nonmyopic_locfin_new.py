@@ -1,3 +1,4 @@
+######################### JOINT VARIATIONAL ESTIMATOR TWO STEP SAMPLE (NON-POLICY) ##########################
 import os
 import pickle
 import argparse
@@ -72,7 +73,7 @@ class OEDMixed:
         return torch_item(loss)
 
 class MomentMatchMarginalPosteriorNonMyopic(VariationalMutualInformationOptimizer):
-    def __init__(self, model, batch_size, flow_x, flow_y, flow_y_future,train_flow,device, **kwargs):
+    def __init__(self, model,future_model, batch_size, flow_x, flow_y, flow_x_future, flow_y_future,sample_future,device, **kwargs):
         super().__init__(
             model=model, batch_size=batch_size
         )
@@ -80,79 +81,94 @@ class MomentMatchMarginalPosteriorNonMyopic(VariationalMutualInformationOptimize
         self.Sigma = 0
         self.dim_lat = 0
         self.dim_obs = 0
+        self.future_model = future_model
         self.fX = flow_x
         self.gY = flow_y
-        self.hY_future = flow_y_future
-        self.train_flow = train_flow
-        self.cond_num = 0
+        self.fX_future = flow_x_future
+        self.gY_future = flow_y_future
+        self.sample_future = sample_future
+        self.hXY = 0
+        self.hXY_future = 0
         self.pi_const = 2*torch.acos(torch.zeros(1, device=device))#.to(device)
         self.e_const = torch.exp(torch.tensor([1], device=device))#.to(device)
         # self.zero_vec = torch.zeros(4).to(device)
 
     def differentiable_loss(self, *args, **kwargs):
-        if self.train_flow:
-            if hasattr(self.fX, "parameters"):
-                #! this is required for the pyro optimizer
-                pyro.module("flow_x_net", self.fX)
-            if hasattr(self.gY, "parameters"):
-                #! this is required for the pyro optimizer
-                pyro.module("flow_y_net", self.gY)
-            if hasattr(self.hY_future, "parameters"):
-                #! this is required for the pyro optimizer
-                pyro.module("flow_y_future_net", self.hY_future)
         # sample from design
         latents, *history = self._get_data(args, kwargs)
 
         self.dim_lat = latents.shape[1]
         self.dim_obs = history[0][1].shape[1]
 
-        mufX, logDetJfX = self.fX.forward(latents)
-        mugY, logDetJgY = self.gY.forward(history[0][1][:,:1])
-        muhY_future, logDetJhy_future = self.hY_future.forward(history[0][1][:,1:])
+        fX_sample, logDetJfX = self.fX.forward(latents)
+        gY_sample, logDetJgY = self.gY.forward(history[0][1][:,:1])
 
-        data = torch.cat([mufX,mugY,muhY_future],axis=1)
+        data = torch.cat([fX_sample,gY_sample],axis=1)
         
         Sigma = cov(data)+1e-5*torch.eye(self.dim_lat+self.dim_obs, device=latents.device)
         self.cond_num = torch.linalg.cond(Sigma)
         
-        # hX = .5*torch.log(torch.linalg.det(Sigma[:self.dim_lat,:self.dim_lat]))+(self.dim_lat/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)
-        # hY = .5*torch.log(torch.linalg.det(Sigma[self.dim_lat:(self.dim_lat+1),self.dim_lat:(self.dim_lat+1)]))+(1/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY)
-        # hXY = .5*torch.log(torch.linalg.det(Sigma[:(self.dim_lat+1),:(self.dim_lat+1)]))+((self.dim_lat+1)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)-torch.mean(logDetJgY)
-        # idx = torch.hstack((torch.arange(self.dim_lat,device=latents.device),(self.dim_lat+1)+torch.arange(self.dim_obs-1,device=latents.device)))
-        # hXYf = .5*torch.log(torch.linalg.det(Sigma[idx,:][:,idx]))+((self.dim_lat+self.dim_obs-1)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)-torch.mean(logDetJhy_future)
-        # hYYf = .5*torch.log(torch.linalg.det(Sigma[self.dim_lat:,self.dim_lat:]))+(self.dim_obs/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY)
-        
-        sign, logdetS  = torch.linalg.slogdet(Sigma)
-        if sign < 0:
-            print("negative det")
-        hXYYf = .5*logdetS +((self.dim_lat+self.dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)-torch.mean(logDetJgY)-torch.mean(logDetJhy_future)
-        Loss = hXYYf#+hXY#hXYf+hXY#
-        
-        if hasattr(self.fX, "spline_transform"):
-            self.fX.spline_transform.requires_grad_(False)
-        if hasattr(self.gY, "spline_transform"):
-            self.gY.spline_transform.requires_grad_(False)
-        if hasattr(self.hY_future, "spline_transform"):
-            self.hY_future.spline_transform.requires_grad_(False)
-            
+        self.hXY = .5*torch.log(torch.linalg.det(Sigma))+(self.dim_lat+self.dim_obs/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)-torch.mean(logDetJgY)
+        hY = .5*torch.log(torch.linalg.det(Sigma[:self.dim_lat,:self.dim_lat]))+(self.dim_obs/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY)
         hX = .5*torch.log(torch.linalg.det(Sigma[:self.dim_lat,:self.dim_lat]))+(self.dim_lat/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)
-        hY = .5*torch.log(torch.linalg.det(Sigma[self.dim_lat:(self.dim_lat+1),self.dim_lat:(self.dim_lat+1)]))+(1/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY)
-        hYYf = .5*torch.log(torch.linalg.det(Sigma[self.dim_lat:,self.dim_lat:]))+(self.dim_obs/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY)-torch.mean(logDetJhy_future)
-        MI = - (hX+hYYf + hY)
-        # MI = -2*Loss
-        # MI = -hYYf
+        Sigmayyyx = torch.linalg.solve(Sigma[self.dim_lat:,self.dim_lat:],Sigma[self.dim_lat:,:self.dim_lat])
+        Sigma_post = Sigma[:self.dim_lat,:self.dim_lat] - torch.matmul(Sigma[:self.dim_lat,self.dim_lat:],Sigmayyyx)
+        mux = torch.mean(fX_sample,axis=0)
+        muy = torch.mean(gY_sample,axis=0)
+        # self.hXY_future = 0
+        # hY_future = 0
+        # hX_future = 0
+        # if self.sample_future:
+        #     for i in range(latents.shape[0]):
+        #         mu_post = mux-torch.matmul(Sigmayyyx.T,gY_sample[i]-muy)
+        #         post_dist = dist.MultivariateNormal(mu_post, Sigma_post)
+        #         latents_future, obs_future = self.future_model(post_dist, self.fX,16)
+        #         fX_future_sample, logDetJfX_future = self.fX_future.forward(latents_future)
+        #         gY_future_sample, logDetJgY_future = self.gY_future.forward(obs_future[0])
+        #         data_future = torch.cat([fX_future_sample,gY_future_sample],axis=1)
+        #         Sigma_future = cov(data_future)+1e-5*torch.eye(self.dim_lat+self.dim_obs, device=latents.device)
+        #         self.hXY_future += .5*torch.log(torch.linalg.det(Sigma_future))+((self.dim_lat+self.dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX_future)-torch.mean(logDetJgY_future)
+        #         hY_future += .5*torch.log(torch.linalg.det(Sigma_future[self.dim_lat:,self.dim_lat:]))+((self.dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY_future)
+        #         hX_future += .5*torch.log(torch.linalg.det(Sigma_future[:self.dim_lat,:self.dim_lat]))+((self.dim_lat)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX_future)
         
-        if hasattr(self.fX, "spline_transform"):
-            self.fX.spline_transform.requires_grad_(True)
-        if hasattr(self.gY, "spline_transform"):
-            self.gY.spline_transform.requires_grad_(True)
-        if hasattr(self.hY_future, "spline_transform"):
-            self.hY_future.spline_transform.requires_grad_(True)
-        
+        # if self.sample_future:
+        #     Sigma_hold = 1e-5*torch.eye(self.dim_lat+self.dim_obs, device=latents.device)
+        #     for i in range(latents.shape[0]):
+        #         mu_post = mux-torch.matmul(Sigmayyyx.T,gY_sample[i]-muy)
+        #         post_dist = dist.MultivariateNormal(mu_post, Sigma_post)
+        #         latents_future, obs_future = self.future_model(post_dist, self.fX,16)
+        #         fX_future_sample, logDetJfX_future = self.fX_future.forward(latents_future)
+        #         gY_future_sample, logDetJgY_future = self.gY_future.forward(obs_future[0])
+        #         data_future = torch.cat([fX_future_sample,gY_future_sample],axis=1)
+        #         Sigma_hold += cov(data_future)#+1e-5*torch.eye(self.dim_lat+self.dim_obs, device=latents.device)
+        #     Sigma_future = (1/latents.shape[0])*Sigma_hold
+        #     self.hXY_future = .5*torch.log(torch.linalg.det(Sigma_future))+((self.dim_lat+self.dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX_future)-torch.mean(logDetJgY_future)
+        #     hY_future = .5*torch.log(torch.linalg.det(Sigma_future[self.dim_lat:,self.dim_lat:]))+((self.dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY_future)
+        #     hX_future = .5*torch.log(torch.linalg.det(Sigma_future[:self.dim_lat,:self.dim_lat]))+((self.dim_lat)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX_future)
+        self.hXY_future = 0
+        hY_future = 0
+        hX_future = 0
+        Sigma_hold = 0
+        if self.sample_future:
+            mu_post = ((mux-torch.matmul(Sigmayyyx.T,(gY_sample-muy).T).T).T).repeat(1,64).T
+            post_dist = dist.MultivariateNormal(0*mux, Sigma_post)
+            latents_future, obs_future = self.future_model(post_dist,mu_post, self.fX,len(gY_sample)*64)
+            fX_future_sample, logDetJfX_future = self.fX_future.forward(latents_future)
+            gY_future_sample, logDetJgY_future = self.gY_future.forward(obs_future[0])
+            data_future = torch.cat([fX_future_sample,gY_future_sample],axis=1)
+            for k in range(len(gY_sample)):
+                Sigma_hold += torch.linalg.slogdet(cov(data_future[k::len(gY_sample)]))[1]
+            Sigma_future = Sigma_hold/len(gY_sample)
+            self.hXY_future = .5*Sigma_future+((self.dim_lat+self.dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX_future)-torch.mean(logDetJgY_future)
+            hY_future = .5*Sigma_future+((self.dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY_future)
+            hX_future = .5*Sigma_future+((self.dim_lat)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX_future)
+            # self.hXY_future = .5*torch.log(torch.linalg.det(Sigma_future))+((self.dim_lat+self.dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX_future)-torch.mean(logDetJgY_future)
+            # hY_future = .5*torch.log(torch.linalg.det(Sigma_future[self.dim_lat:,self.dim_lat:]))+((self.dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY_future)
+            # hX_future = .5*torch.log(torch.linalg.det(Sigma_future[:self.dim_lat,:self.dim_lat]))+((self.dim_lat)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX_future)
         # save optimal parameters for decision
         self.mu = torch.mean(data,axis=0)
         self.Sigma = Sigma
-        return MI+Loss
+        return self.hXY-hX-hY+(self.hXY_future-hX_future-hY_future)#(1/latents.shape[0])*(self.hXY_future-hX_future-hY_future)
 
     def loss(self, *args, **kwargs):
         """
@@ -197,6 +213,7 @@ class HiddenObjectsNonMyopic(nn.Module):
     def __init__(
         self,
         design_net,
+        design_net_future,
         base_signal=0.1,  # G-map hyperparam
         max_signal=1e-4,  # G-map hyperparam
         theta_loc=None,  # prior on theta mean hyperparam
@@ -209,6 +226,7 @@ class HiddenObjectsNonMyopic(nn.Module):
     ):
         super().__init__()
         self.design_net = design_net
+        self.design_net_future = design_net_future
         self.base_signal = base_signal
         self.max_signal = max_signal
         # Set prior:
@@ -289,6 +307,41 @@ class HiddenObjectsNonMyopic(nn.Module):
             xi_designs.append(xi)
         
         return theta, xi_designs, y_outcomes
+    
+    def _future_model(self, post,mu_post, post_flow,num_samples):
+        theta = post.sample((1,num_samples))[0]
+        # with torch.no_grad():
+        theta += mu_post
+        theta = post_flow.reverse(theta)
+        theta = theta.reshape((len(theta),self.K,self.p))
+        y_outcomes = []
+        xi_designs = []
+
+        # T-steps experiment
+        for t in range(self.T):
+            ####################################################################
+            # Get a design xi; shape is [batch size x self.n x self.p]
+            ####################################################################
+            xi = compute_design(
+                f"xi{t + 2}", self.design_net_future.lazy(*zip(xi_designs, y_outcomes))
+            )
+            xi = xi*torch.ones((len(theta),1,xi.shape[1]),device=xi.device)
+            if torch.any(xi.isnan()):
+                print('NaN')
+            # self.prev_design = 1*xi[0]
+            # xi = xi.reshape(xi.shape[0], int(xi.shape[2]/self.p), self.p)
+            ####################################################################
+            # Sample y at xi; shape is [batch size x 1]
+            ####################################################################
+            mean = self.forward_map(xi, theta)
+            sd = self.noise_scale
+            y = observation_sample(f"y{t + 1}", dist.Normal(mean, sd).to_event(1))
+            ####################################################################
+            # Update history
+            ####################################################################
+            y_outcomes.append(y)
+            xi_designs.append(xi)
+        return theta.flatten(-2), y_outcomes
 
     def forward(self, theta):
         """Run the policy for a given theta"""
@@ -349,7 +402,7 @@ def optimise_design(
     posterior_cov,
     flow_theta,
     flow_obs,
-    prev_obs,
+    sample_future,
     design_init,
     train_flow,
     run_flow,
@@ -363,20 +416,22 @@ def optimise_design(
     lr,
     annealing_scheme,
 ):
-    T = len(design_init)
     # design_init_dist = (
     #     torch.distributions.Normal(design_init, 0.01)
     #     if experiment_number == 0
     #     else torch.distributions.Normal(design_init, 1.0)
     # )
-    design_init_dist = torch.distributions.Normal(design_init,0.01)#0.01
+    design_init_dist = torch.distributions.Normal(design_init,.1)#0.01
     design_net = BatchDesignBaselineNonMyopic(
-        T=1, design_dim=(T, p), design_init=design_init_dist
+        T=1, design_dim=(1, p), design_init=design_init_dist
     ).to(device)
-
-
+    
+    design_net_future = BatchDesignBaselineNonMyopic(
+        T=1, design_dim=(1, p), design_init=design_init_dist
+    ).to(device)
     ho_model = HiddenObjectsNonMyopic(
         design_net=design_net,
+        design_net_future=design_net_future,
         theta_loc=posterior_loc,
         theta_covmat=posterior_cov,
         flow_theta = flow_theta,
@@ -388,150 +443,105 @@ def optimise_design(
     
     if run_flow:
         dim_x = num_sources*p
-        dim_y = T
+        dim_y = 1
         if flow_theta == None:
-            flowx_loss = torch.tensor(torch.nan)
-            init_lr_x = .005
-            while torch.isnan(flowx_loss):
-                fX = SplineFlow(dim_x,n_flows=1,hidden_dims=[32], count_bins=128, bounds=4,order = 'quadratic', device=device)
-                fX, flowx_loss= InitFlowToIdentity(dim_x, fX, bounds=4,lr=init_lr_x,device=device)
-                init_lr_x *= .5
+            # flowx_loss = torch.tensor(torch.nan)
+            # init_lr_x = .005
+            # while torch.isnan(flowx_loss):
+            #     fX = SplineFlow(dim_x,n_flows=1,hidden_dims=[32], count_bins=128, bounds=4,order = 'quadratic', device=device)
+            #     fX, flowx_loss= InitFlowToIdentity(dim_x, fX, bounds=4,lr=init_lr_x,device=device)
+            #     init_lr_x *= .5
+            fX = SplineFlow(dim_x,n_flows=1,hidden_dims=[32], count_bins=128, bounds=4,order = 'quadratic', device=device)
         else:
             fX = copy.deepcopy(flow_theta)
         if flow_obs == None:
-            flowy_loss = torch.tensor(torch.nan)
-            init_lr_y = .005
-            while torch.isnan(flowy_loss):
-                gY = SplineFlow(1, count_bins=128, bounds=5,order = 'quadratic', device=device)#SplineFlow(1, count_bins=256, bounds=3, device=device).to(device)
-                gY, flowy_loss = InitFlowToIdentity(1, gY, bounds=5,lr=init_lr_y,device=device)
-                init_lr_y *= .5
+            # flowy_loss = torch.tensor(torch.nan)
+            # init_lr_y = .005
+            # while torch.isnan(flowy_loss):
+            #     gY = SplineFlow(1, count_bins=128, bounds=5,order = 'quadratic', device=device)#SplineFlow(1, count_bins=256, bounds=3, device=device).to(device)
+            #     gY, flowy_loss = InitFlowToIdentity(1, gY, bounds=5,lr=init_lr_y,device=device)
+            #     init_lr_y *= .5
+            gY = SplineFlow(1, count_bins=128, bounds=5,order = 'quadratic', device=device)#SplineFlow(1, count_bins=256, bounds=3, device=device).to(device)
         else:
             gY = copy.deepcopy(flow_obs)
-            # gY = SplineFlow(dim_y, count_bins=256, bounds=3, device=device).to(device)
-            # # gY = InitFlowToIdentity(dim_y, gY, bounds=3,device=device)
-            # gY = InitFlowToPrev(dim_y, gY, flow_obs, prev_obs, bounds = 3, device = device)
-        # gY = SplineFlow(1, count_bins=256, bounds=3, device=device).to(device)
-        # gY = InitFlowToIdentity(dim_y, gY, bounds=3,device=device)
-        if T == 1:
-            hY_future = IdentityTransform()
+        if sample_future:
+            fX_future = SplineFlow(dim_x,n_flows=1,hidden_dims=[32], count_bins=128, bounds=4,order = 'quadratic', device=device)
+            gY_future = SplineFlow(1, count_bins=128, bounds=5,order = 'quadratic', device=device)
         else:
-            flowyf_loss = torch.tensor(torch.nan)
-            init_lr_yf = .005
-            while torch.isnan(flowyf_loss):
-                hY_future = SplineFlow(T-1,n_flows=1,hidden_dims=[32], count_bins=128, bounds=4,order = 'linear')
-                hY_future, flowyf_loss= InitFlowToIdentity(T-1, hY_future, bounds=4,lr=init_lr_yf,device=device)
-                init_lr_yf  *= .5
+            fX_future = IdentityTransform()
+            gY_future = IdentityTransform()
+            
     else:
         fX = IdentityTransform()
         gY = IdentityTransform()
-        hY_future = IdentityTransform()
+        fX_future = IdentityTransform()
+        gY_future = IdentityTransform()
 
     ### Set-up loss ###
     mi_loss_instance = MomentMatchMarginalPosteriorNonMyopic(
         model=ho_model.model,
+        future_model=ho_model._future_model,
         batch_size=batch_size,
         flow_x=fX,
         flow_y=gY,
-        flow_y_future=hY_future,
-        train_flow=train_flow,
+        flow_x_future=fX_future,
+        flow_y_future=gY_future,
+        prior_flow = flow_theta,
+        sample_future=sample_future,
         device=device
     )
-    
+    lr_design = .005
+    lr_flow = .005
+    ### Set-up optimiser ###
+    optimizer_design = torch.optim.Adam(list(ho_model.design_net.designs.parameters())+list(ho_model.design_net_future.designs.parameters()))#ho_model.design_net.designs)
     annealing_freq, factor = annealing_scheme
-    if True:#run_flow and train_flow:#
-        print('ADAM')
-        def separate_learning_rate(module_name, param_name):
-            if module_name == "design_net":
-                return {"lr": .0005}#lr .0005
-            else:
-                return {"lr": .005}#.005
-        
-        ### Set-up optimiser ###
-        optimizer = torch.optim.Adam
+    scheduler_design = pyro.optim.ExponentialLR(
+        {
+            "optimizer": optimizer_design,
+            "optim_args": {"lr": lr_design},
+            "gamma" : factor,
+            "verbose": False,
+        }
+    )
+    
+    if run_flow and train_flow:
+        optimizer_flow = torch.optim.Adam(list(mi_loss_instance.fX.parameters())+list(mi_loss_instance.gY.parameters())+list(mi_loss_instance.fX_future.parameters())+list(mi_loss_instance.gY_future.parameters()))
         annealing_freq, factor = annealing_scheme
-        scheduler = pyro.optim.ExponentialLR(
+        scheduler_flow = pyro.optim.ExponentialLR(
             {
-                "optimizer": optimizer,
-                "optim_args": separate_learning_rate,#{"lr": lr},#
+                "optimizer": optimizer_flow,
+                "optim_args": {"lr": lr_flow},
                 "gamma" : factor,
                 "verbose": False,
             }
         )
-        # patience = 5
-        # scheduler = pyro.optim.ReduceLROnPlateau(
-        #     {
-        #         "optimizer": optimizer,
-        #         "optim_args": separate_learning_rate,#:{"lr": lr},
-        #         "factor": factor,
-        #         "patience": patience,
-        #         "verbose": False,
-        #     }
-        # )
-
-        oed = OED(optim=scheduler, loss=mi_loss_instance)
-    else:
-        print('LBFGS')
-        scheduler = None
-        # design_net.designs[0].requires_grad = False
-        optimizer_design = torch.optim.LBFGS(ho_model.design_net.designs, lr=.001)#design_net.designs
-        oed = OEDMixed(optim_design = optimizer_design, optim_flow = scheduler, loss = mi_loss_instance)
-        
-        def scipy_loss(design):
-            design_net.designs[0] = torch.from_numpy(design.reshape(T, p)).to(design_net.designs[0].device)
-            loss = -mi_loss_instance.differentiable_loss()#*args, **kwargs
-            return loss.item()
-        def scipy_loss_jac(design):
-            diff = torch.zeros(T*p, device = design_net.designs[0].device)
-            step = torch.zeros(T*p, device = design_net.designs[0].device)
-            design_net.designs[0] = torch.from_numpy(design.reshape(T, p)).to(design_net.designs[0].device)
-            loss1 = -mi_loss_instance.differentiable_loss()#*args, **kwargs
-            for i in range(int(T*p)):
-                step[i] = 1e-3
-                design_net.designs[0] = torch.from_numpy(design.reshape(T, p)).to(design_net.designs[0].device) + step.reshape(T, p)
-                loss2 = -mi_loss_instance.differentiable_loss()#*args, **kwargs
-                diff[i] = (loss1-loss2)/-1e-3
-                step[i]=0
-                step.flatten()
-            return diff.cpu().detach().numpy()
-        import scipy
-        init = design_init_dist.sample().cpu().flatten()
-        design_prev = init
-        funceval = 0
-        anneal = 250
-        j=0
-        # for i in range(5000):
-        while funceval<5000:
-            loss = scipy.optimize.minimize(scipy_loss, init, method='L-BFGS-B')#, jac=scipy_loss_jac)#, hess=None, hessp=None, bounds=None, constraints=(), tol=None, callback=None, options=None)
-            init = loss.x
-            funceval += loss.nfev
-            print(funceval)
-            if funceval>anneal:
-                design_diff = torch.max(((torch.from_numpy(init)-design_prev).pow(2)).reshape(T,p).sum(axis=1).pow(.5))
-                anneal += 250
-                if design_diff < 2e-3:
-                    j+=1
-                    if j>=2:
-                        break
-                else:
-                    design_prev = 1*torch.from_numpy(init)
-                    j=0
-        # print(loss)
-         
+    
     ### Optimise ###
+    design_prev = 1*design_net.designs[0]
+    print(design_prev)
+    j=0
     loss_history = []
     num_steps_range = trange(0, num_steps + 0, desc="Loss: 0.000 ")
-    design_prev = design_init
-    j=0
     for i in num_steps_range:
-        loss = oed.step()
+        optimizer_design.zero_grad()
+        negMI = mi_loss_instance.differentiable_loss()
+        negMI.backward(retain_graph=True)
+        # torch.nn.utils.clip_grad_norm_(design_net.parameters(), 1.0)
+        optimizer_design.step()
+        if run_flow and train_flow:
+            optimizer_flow.zero_grad()
+            # # Log Likelihood Optimization
+            (mi_loss_instance.hXY+mi_loss_instance.hXY_future).backward()
+            # Foster Bound Optimization
+            # (mi_loss_instance.hX + mi_loss_instance.hXY - mi_loss_instance.hY).backward()
+            # (mi_loss_instance.hX+mi_loss_instance.hY).backward()
+            optimizer_flow.step()
+            
         if i % 100 == 0:
-            num_steps_range.set_description("Loss: {:.3f} ".format(loss))
-            loss_eval = oed.evaluate_loss()
+            num_steps_range.set_description("Loss: {:.3f} ".format(torch_item(negMI)))
+            loss_eval = mi_loss_instance.loss()#*args, **kwargs)
             loss_history.append(loss_eval)
-
-        if i % annealing_freq == 0 and not i == 0 and run_flow and train_flow:
-            scheduler.step()
-            # scheduler.step(loss_eval)
+            
         if i % 500 ==0 and not i == 0:
             with torch.no_grad():
                 design_current = design_net.designs[0]
@@ -539,10 +549,11 @@ def optimise_design(
                 # with torch.no_grad():
                 #     hold, toss = mi_loss_instance.fX.forward(posterior_loc)
                 #     print(hold)
-                # print(design_current)
+                print(design_current)
+                print(design_net_future.designs[0])
                 # design_prev = 1*design_current
                 # print(design_diff)
-                if design_diff < 1e-1:
+                if design_diff < 1e-3:
                     j+=1
                     if j>=2:
                         break
@@ -583,9 +594,11 @@ def main_loop(
     posterior_loc = theta_loc.reshape(-1)
     posterior_cov = torch.eye(p * num_sources, device=device)
 
-    design_init = torch.zeros((T,p),device=device, dtype=torch.float32)
-    prev_obs = 0
+    design_init = torch.zeros((1,p),device=device, dtype=torch.float32)
+    sample_future = True
     for t in range(0, T):
+        if t == T-1:
+            sample_future = False
         t_start = time.time()
         print(f"Step {t + 1}/{T} of Run {run + 1}")
         pyro.clear_param_store()
@@ -594,7 +607,7 @@ def main_loop(
             posterior_cov,
             flow_theta,
             flow_obs,
-            prev_obs,
+            sample_future,
             design_init,
             train_flow=train_flow,
             run_flow=run_flow,
@@ -629,7 +642,7 @@ def main_loop(
             flow_theta = mi_loss_instance.fX
             flow_obs = mi_loss_instance.gY
             
-            design_init = 0*design[0][0][1:]
+            design_init = 0*ho_model.design_net_future.forward().detach()
             prev_obs = observation[0][0][0]
         t_end = time.time()
         run_time = t_end-t_start
@@ -721,8 +734,8 @@ def main(
     t = time.localtime()
     extra_data_id = time.strftime("%Y%m%d%H%M%S", t)
     path_to_extra_data = "./experiment_outputs/loc_fin/{}".format(extra_data_id)
-    if not os.path.exists(path_to_extra_data):
-        os.makedirs(path_to_extra_data)
+    # if not os.path.exists(path_to_extra_data):
+    #     os.makedirs(path_to_extra_data)
     print(path_to_extra_data)
 
     results_vi = {"loop": [], "seed": seed, "meta": meta}
@@ -795,13 +808,13 @@ if __name__ == "__main__":
         "--num-parallel", help="Number of histories to run parallel", default=1, type=int
     )
     parser.add_argument("--num-experiments", default=10, type=int)
-    parser.add_argument("--batch-size", default=1024, type=int)
+    parser.add_argument("--batch-size", default=128, type=int)
     parser.add_argument("--device", default="cuda", type=str)
     parser.add_argument(
         "--mlflow-experiment-name", default="locfin_mm_variational", type=str
     )
     parser.add_argument("--lr", default=.005, type=float)
-    parser.add_argument("--annealing-scheme", nargs="+", default=[250,.8], type=float)#[250,.8]
+    parser.add_argument("--annealing-scheme", nargs="+", default=[500,.9], type=float)#[250,.8]
     parser.add_argument("--num-steps", default=5000, type=int)
     parser.add_argument("--train-flow-every-step", default=True, type=bool)
     parser.add_argument("--run-flow", default=True, type=bool)

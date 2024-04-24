@@ -348,11 +348,23 @@ def main(path_to_artifact):
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluation")
-    parser.add_argument("--path-to-artifact", default="experiment_outputs/loc_fin/20240325224850", type=str)
+    parser.add_argument("--path-to-artifact", default="experiment_outputs/SIR/20240418100716", type=str)
     ### Loc FIn
     # mlruns/145551772296899500/d3fceeecf790419793e42374817f23f6/artifacts/results_locfin_mm_vi.pickle
     # experiment_outputs/loc_fin/20240229231620
     
+    # Gauss SIR
+    # (random init)
+    # experiment_outputs/SIR/20240418091526
+    # experiment_outputs/SIR/20240418092544
+    # (fixed init)
+    # experiment_outputs/SIR/20240418095723
+    
+    # Flow SIR
+    # (random init) experiment_outputs/SIR/20240418100915
+    # experiment_outputs/SIR/20240418092033
+    # (fixed init) experiment_outputs/SIR/20240418100716
+    #
     
     # First Flow: (9142547)  "experiment_outputs/SIR/20240219152500"
     # Decision:   (9145135)  "experiment_outputs/SIR/20240219210049"

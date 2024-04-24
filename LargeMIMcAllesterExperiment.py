@@ -1,11 +1,12 @@
 import numpy as np
 import bmi
-from _flow_estimator import FlowPostEstimator, FlowMargPostEstimator
+# from _flow_estimator import FlowPostEstimator, FlowMargPostEstimator
 from joblib import Parallel, delayed
 import pickle
 import os
 import argparse
 import time
+from _flow_estimator import NeuralVariationalEstimator,JointVariationalEstimator
 
 def evaluate_parallel(i,
     seed,
@@ -26,15 +27,37 @@ def evaluate_parallel(i,
     X = sample[:,:dim]
     Y = sample[:,dim:]
     
-    if 'FlowP' in Method_Names:
-        FlowP = FlowPostEstimator(batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)#max_n_steps=int(100*(i+1))
-        FlowPResults = FlowP.estimate_with_info(X,Y)
-        results["FlowP"] = FlowPResults
+    # if 'FlowP' in Method_Names:
+    #     # FlowP = FlowPostEstimator(batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)#max_n_steps=int(100*(i+1))
+    #     FlowP = NeuralVariationalEstimator(dim_x=dim,dim_y=dim,batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
+    #     # FlowP = JointVariationalEstimator(dim_x=dim,dim_y=dim,batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
+    #     FlowPResults = FlowP.estimate_with_info(X,Y)
+    #     results["FlowP"] = FlowPResults
     
-    if 'FlowMP' in Method_Names:
-        FlowMP = FlowMargPostEstimator(batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)#max_n_steps=int(100*(i+1))
-        FlowMPResults = FlowMP.estimate_with_info(X,Y)
-        results["FlowMP"] = FlowMPResults
+    # if 'FlowMP' in Method_Names:
+    #     # FlowMP = FlowMargPostEstimator(batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)#max_n_steps=int(100*(i+1))
+    #     FlowMP = JointVariationalEstimator(dim_x=dim,dim_y=dim,batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
+    #     FlowMPResults = FlowMP.estimate_with_info(X,Y)
+    #     results["FlowMP"] = FlowMPResults
+    if 'JointGauss' in Method_Names:
+        JointGauss = JointVariationalEstimator(dim_x=dim,dim_y=dim,use_flow=False,batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
+        JointGaussResults = JointGauss.estimate_with_info(X,Y)
+        results['JointGauss'] = JointGaussResults
+        
+    if 'NeuralGauss' in Method_Names:
+        NeuralGauss = NeuralVariationalEstimator(dim_x=dim,dim_y=dim,use_flow=False,batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
+        NeuralGaussResults = NeuralGauss.estimate_with_info(X,Y)
+        results['NeuralGauss'] = NeuralGaussResults
+        
+    if 'JointFlow' in Method_Names:
+        JointFlow = JointVariationalEstimator(dim_x=dim,dim_y=dim,use_flow=True,batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
+        JointFlowResults = JointFlow.estimate_with_info(X,Y)
+        results['JointFlow'] = JointFlowResults
+        
+    if 'NeuralFlow' in Method_Names:
+        NeuralFlow = NeuralVariationalEstimator(dim_x=dim,dim_y=dim,use_flow=True,batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
+        NeuralFlowResults = NeuralFlow.estimate_with_info(X,Y)
+        results['NeuralFlow'] = NeuralFlowResults
     
     if 'MINE' in Method_Names:
         mine = bmi.estimators.MINEEstimator(batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
@@ -123,20 +146,21 @@ if __name__ == "__main__":
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--device", default="cpu", type=str)
     
-    parser.add_argument("--dim", default=2, type=int)#32
-    parser.add_argument("--rho", default=.9, type=int)
+    parser.add_argument("--dim", default=15, type=int)#32
+    parser.add_argument("--rho", default=.95, type=int)
     
     parser.add_argument("--num-runs", default=10, type=int)
     
-    parser.add_argument("--num-samples", default=25000, type=int)
+    parser.add_argument("--num-samples", default=75000, type=int)
     parser.add_argument("--train_test_split", default=.8, type=float)
     parser.add_argument("--batch-size", default=256, type=int)
     parser.add_argument("--test_every_n_steps", default=50, type=int)
     
     parser.add_argument("--lr", default=0.001, type=float)
-    parser.add_argument("--num-steps", default=500, type=int)#10000
+    parser.add_argument("--num-steps", default=3000, type=int)#10000
     
-    Methods = ['FlowP','FlowMP','MINE','InfoNCE','NWJ','DV']
+    # Methods = ['FlowP','FlowMP','MINE','InfoNCE']#'FlowP','FlowMP','MINE','InfoNCE','NWJ','DV']#, 'CCA', 'KSG'
+    Methods = ['JointGauss','NeuralGauss','JointFlow','NeuralFlow', 'MINE', 'InfoNCE', 'NWJ', 'DV']
     parser.add_argument("--method_names", default=Methods, type=list)
     
 

@@ -1,3 +1,4 @@
+##################### JOINT VARIATIONAL ESTIMATOR GREEDY ############################################
 import os
 import pickle
 import argparse
@@ -61,6 +62,9 @@ class MomentMatchMarginalPosteriorTest(VariationalMutualInformationOptimizer):
         # Sigma[:1,1:] = Sigma[:1,1:]-torch.outer(Sigma[:1,1],Sigma[1,1:]/Sigma[1,1]).detach()
         # Sigma[-1,:-1] = Sigma[:-1,-1]
         Sigma = torch.cov(data.T)#(.1*torch.cov(data.T)+.9*self.Sigma.detach())#
+        
+        if torch.linalg.cond(Sigma) >400:
+            cond_hold = 1
         # chol_Sx = torch.linalg.cholesky(Sigma[:self.dim_lat,:self.dim_lat])
         # chol_Sy = torch.linalg.cholesky(Sigma[self.dim_lat:,self.dim_lat:])
         # Sigma1 = torch.eye(self.dim_lat+self.dim_obs, device=latents.device)

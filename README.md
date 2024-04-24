@@ -4,8 +4,8 @@ Implementation of code in Flow Moment Matching paper
 ## Setting Up Enviornment and downloading requirements
 ### Enviornement Requirements
 ```bash
-conda create -n idad_code
-conda activate idad_code
+conda create -n distvarmi_code #idad_code #distvarmi_code
+conda activate distvarmi_code # idad_code
 ```
 All the code in this repo will only work with python 
 version 3.10
@@ -22,6 +22,7 @@ pip install tensorflow-probability
 pip install plotly
 pip install kaleido
 pip install seaborn
+pip install jax==0.4.23 jaxlib==0.4.23
 ```
 
 ## Requirements for Sequential Design Experiments

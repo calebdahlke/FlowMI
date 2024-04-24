@@ -301,7 +301,7 @@ class VariationalMutualInformationOptimizer(object):
         return (latents, *zip(designs, observations))
 
 class MomentMatchMarginalPosterior(VariationalMutualInformationOptimizer):
-    def __init__(self, model, batch_size, flow_x, flow_y,train_flow,device, **kwargs):
+    def __init__(self, model, batch_size, flow_x, flow_y,prev_flow_theta,train_flow,device, **kwargs):
         super().__init__(
             model=model, batch_size=batch_size
         )
@@ -310,9 +310,12 @@ class MomentMatchMarginalPosterior(VariationalMutualInformationOptimizer):
         self.dim_lat = 0
         self.dim_obs = 0
         self.hX = 0
+        self.hY = 0
+        self.hXY = 0
         self.hX_Y = 0
         self.fX = flow_x
         self.gY = flow_y
+        self.flow_theta = prev_flow_theta if prev_flow_theta is not None else IdentityTransform()
         self.train_flow = train_flow
         self.pi_const = 2*torch.acos(torch.zeros(1, device=device))
         self.e_const = torch.exp(torch.tensor([1], device=device))
@@ -322,15 +325,17 @@ class MomentMatchMarginalPosterior(VariationalMutualInformationOptimizer):
     def differentiable_loss(self, *args, **kwargs):
         # self.grad_free_flow_x = copy.deepcopy(self.fX)
         # self.grad_free_flow_y = copy.deepcopy(self.gY)
-        if self.train_flow:
-            if hasattr(self.fX, "parameters"):
-                #! this is required for the pyro optimizer
-                pyro.module("flow_x_net", self.fX)
-            if hasattr(self.gY, "parameters"):
-                #! this is required for the pyro optimizer
-                pyro.module("flow_y_net", self.gY)
+        # if self.train_flow:
+        #     if hasattr(self.fX, "parameters"):
+        #         #! this is required for the pyro optimizer
+        #         pyro.module("flow_x_net", self.fX)
+        #     if hasattr(self.gY, "parameters"):
+        #         #! this is required for the pyro optimizer
+        #         pyro.module("flow_y_net", self.gY)
 
         latents, *history = self._get_data(args, kwargs)
+        with torch.no_grad():
+            latents = self.flow_theta.reverse(latents)
         # latents, *history = self.model()
 
         self.dim_lat = latents.shape[1]
@@ -344,32 +349,32 @@ class MomentMatchMarginalPosterior(VariationalMutualInformationOptimizer):
         Sigma = torch.cov(data.T)#cov(data)+1e-5*torch.eye(self.dim_lat+self.dim_obs, device=latents.device)
 
         #################################################### Maximum Likelihood Bound ###############################################################
-        sign, logdetS  = torch.linalg.slogdet(Sigma)
-        if sign < 0:
-            print("negative det")
-        Loss = .5*logdetS +((self.dim_lat+self.dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)-torch.mean(logDetJgY)
-        # MI = 0
-        if self.train_flow:
-            if hasattr(self.fX, "spline_transform"):
-                self.fX.spline_transform.requires_grad_(False)
-            if hasattr(self.gY, "spline_transform"):
-                self.gY.spline_transform.requires_grad_(False)
-        sign, logdetSx  = torch.linalg.slogdet(Sigma[:self.dim_lat,:self.dim_lat])
-        if sign < 0:
-            print("negative det")
-        hX = .5*logdetSx+(self.dim_lat/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)
+        # sign, logdetS  = torch.linalg.slogdet(Sigma)
+        # if sign < 0:
+        #     print("negative det")
+        # Loss = .5*logdetS +((self.dim_lat+self.dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)-torch.mean(logDetJgY)
+        # # MI = 0
+        # if self.train_flow:
+        #     if hasattr(self.fX, "spline_transform"):
+        #         self.fX.spline_transform.requires_grad_(False)
+        #     if hasattr(self.gY, "spline_transform"):
+        #         self.gY.spline_transform.requires_grad_(False)
+        # sign, logdetSx  = torch.linalg.slogdet(Sigma[:self.dim_lat,:self.dim_lat])
+        # if sign < 0:
+        #     print("negative det")
+        # hX = .5*logdetSx+(self.dim_lat/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)
         
-        sign, logdetSy  = torch.linalg.slogdet(Sigma[self.dim_lat:,self.dim_lat:])
-        if sign < 0:
-            print("negative det")
-        hY = .5*logdetSy +(1/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY)
+        # sign, logdetSy  = torch.linalg.slogdet(Sigma[self.dim_lat:,self.dim_lat:])
+        # if sign < 0:
+        #     print("negative det")
+        # hY = .5*logdetSy +(1/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY)
 
-        MI = -hY#-hX
-        if self.train_flow:
-            if hasattr(self.fX, "spline_transform"):
-                self.fX.spline_transform.requires_grad_(True)
-            if hasattr(self.gY, "spline_transform"):
-                self.gY.spline_transform.requires_grad_(True)
+        # MI = -hY#-hX
+        # if self.train_flow:
+        #     if hasattr(self.fX, "spline_transform"):
+        #         self.fX.spline_transform.requires_grad_(True)
+        #     if hasattr(self.gY, "spline_transform"):
+        #         self.gY.spline_transform.requires_grad_(True)
         ##################################################################################################################################
                 
         ###################################### Traditional Bound #########################################################################        
@@ -400,13 +405,32 @@ class MomentMatchMarginalPosterior(VariationalMutualInformationOptimizer):
         #         self.gY.spline_transform.requires_grad_(True)
         ##########################################################################################################################
         
+        sign, logdetS  = torch.linalg.slogdet(Sigma)
+        if sign < 0:
+            print("negative det")
+        self.hXY = .5*logdetS +((self.dim_lat+self.dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)-torch.mean(logDetJgY)
+        # self.hXY = .5*logdetS-torch.mean(logDetJfX)-torch.mean(logDetJgY)
+        # self.hXY = .5*torch.log(1-torch.sum(Sigma[self.dim_lat:,:self.dim_lat]**2)) +((self.dim_lat+self.dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)-torch.mean(logDetJgY)+torch.linalg.slogdet(Sigma1[:self.dim_lat,:self.dim_lat])[1]+torch.linalg.slogdet(Sigma1[self.dim_lat:,self.dim_lat:])[1]
+
+        sign, logdetSx  = torch.linalg.slogdet(Sigma[:self.dim_lat,:self.dim_lat])
+        if sign < 0:
+            print("negative det")
+        self.hX = .5*logdetSx+(self.dim_lat/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)
+        # self.hX = .5*logdetSx-torch.mean(logDetJfX)
+        # self.hX = (self.dim_lat/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)+torch.linalg.slogdet(Sigma1[:self.dim_lat,:self.dim_lat])[1]
+        
+        sign, logdetSy  = torch.linalg.slogdet(Sigma[self.dim_lat:,self.dim_lat:])
+        if sign < 0:
+            print("negative det")
+        self.hY = .5*logdetSy +(self.dim_obs/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY)
+        
         # save optimal parameters for decision
         self.mu = torch.mean(data,axis=0)
         self.Sigma = Sigma
         # hXY = self.compute_joint_entropy(latents,history[0][1])
         # hX, hY = self.compute_marginal_entropies(latents,history[0][1])
         
-        return MI+Loss
+        return self.hXY-self.hX-self.hY#MI+Loss
 
     def loss(self, *args, **kwargs):
         """

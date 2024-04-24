@@ -1,3 +1,4 @@
+############################## NEURAL VARIATIONAL ESTIMATOR GREEDY ###############################
 import os
 import pickle
 import argparse
@@ -487,8 +488,8 @@ def main_loop(
         
         ## Fixes deepcopy issue?
         with torch.no_grad():
-            _,_ = mi_loss_instance.fX_prior(trans_true_theta.reshape(len(true_theta),-1))
-            _,_ = mi_loss_instance.fX_post(trans_true_theta.reshape(len(true_theta),-1))
+            mu_prior_trans,_ = mi_loss_instance.fX_prior(mi_loss_instance.mu_prior)
+            mu_post_trans,_ = mi_loss_instance.fX_post(posterior_loc)
             
         flow_prior_theta = mi_loss_instance.fX_prior
         flow_post_theta = mi_loss_instance.fX_post
@@ -502,6 +503,7 @@ def main_loop(
         print(f"Fitted posterior: mean = {posterior_loc}, sd = {posterior_scale}")
         print("True theta = ", true_theta.reshape(-1))
         
+        #### Plot From True Theta
         with torch.no_grad():
             import numpy as np
             import scipy
@@ -511,14 +513,14 @@ def main_loop(
             X, Y = np.meshgrid(x, y)
             fig, axs = plt.subplots(2, 2)
             ######### Prior on source 1 ###########################################################
-            fX, logJac = mi_loss_instance.fX_prior.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),mi_loss_instance.mu_prior[2].cpu().numpy()*np.ones(np.shape(X.flatten())),mi_loss_instance.mu_prior[3].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
+            fX, logJac = mi_loss_instance.fX_prior.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),true_theta[0][1][0].cpu().numpy()*np.ones(np.shape(X.flatten())),true_theta[0][1][1].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
             points = fX.reshape((100,100,4))
             Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mi_loss_instance.mu_prior.cpu().numpy(), mi_loss_instance.Sigma_prior.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
             axs[0, 0].pcolor(X, Y, Z)
             axs[0, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
             axs[0, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
             ######### Prior on source 2 ###########################################################
-            fX, logJac = mi_loss_instance.fX_prior.forward(torch.from_numpy((np.vstack((mi_loss_instance.mu_prior[0].cpu().numpy()*np.ones(np.shape(X.flatten())),mi_loss_instance.mu_prior[1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
+            fX, logJac = mi_loss_instance.fX_prior.forward(torch.from_numpy((np.vstack((true_theta[0][0][0].cpu().numpy()*np.ones(np.shape(X.flatten())),true_theta[0][0][1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
             points = fX.reshape((100,100,4))
             Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mi_loss_instance.mu_prior.cpu().numpy(), mi_loss_instance.Sigma_prior.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
             axs[0, 1].pcolor(X, Y, Z)
@@ -526,14 +528,14 @@ def main_loop(
             axs[0, 1].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
             
             ######### Posterior on source 1 ###########################################################
-            fX, logJac = flow_post_theta.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),posterior_loc[0,2].cpu().numpy()*np.ones(np.shape(X.flatten())),posterior_loc[0,3].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
+            fX, logJac = flow_post_theta.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),true_theta[0][1][0].cpu().numpy()*np.ones(np.shape(X.flatten())),true_theta[0][1][1].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
             points = fX.reshape((100,100,4))
             Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc[0].cpu().numpy(), torch.diag(posterior_scale[0]).cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
             axs[1, 0].pcolor(X, Y, Z)
             axs[1, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
             axs[1, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
             ######### Posterior on source 2 ###########################################################
-            fX, logJac = flow_post_theta.forward(torch.from_numpy((np.vstack((posterior_loc[0,0].cpu().numpy()*np.ones(np.shape(X.flatten())),posterior_loc[0,1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
+            fX, logJac = flow_post_theta.forward(torch.from_numpy((np.vstack((true_theta[0][0][0].cpu().numpy()*np.ones(np.shape(X.flatten())),true_theta[0][0][1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
             points = fX.reshape((100,100,4))
             Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc[0].cpu().numpy(), torch.diag(posterior_scale[0]).cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
             axs[1, 1].pcolor(X, Y, Z)
@@ -544,6 +546,94 @@ def main_loop(
             axs[0, 0].set(ylabel='Prior')
             axs[1, 0].set(ylabel='Posterior')
             plt.show()
+            
+        # #### Plot From Mean Value
+        # with torch.no_grad():
+        #     import numpy as np
+        #     import scipy
+        #     import matplotlib.pyplot as plt
+        #     x = np.linspace(-2.5,2.5,100)
+        #     y = np.linspace(-2.5,2.5,100)
+        #     X, Y = np.meshgrid(x, y)
+        #     fig, axs = plt.subplots(2, 2)
+        #     ######### Prior on source 1 ###########################################################
+        #     fX, logJac = mi_loss_instance.fX_prior.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),mi_loss_instance.mu_prior[2].cpu().numpy()*np.ones(np.shape(X.flatten())),mi_loss_instance.mu_prior[3].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
+        #     points = fX.reshape((100,100,4))
+        #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mi_loss_instance.mu_prior.cpu().numpy(), mi_loss_instance.Sigma_prior.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+        #     axs[0, 0].pcolor(X, Y, Z)
+        #     axs[0, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
+        #     axs[0, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+        #     ######### Prior on source 2 ###########################################################
+        #     fX, logJac = mi_loss_instance.fX_prior.forward(torch.from_numpy((np.vstack((mi_loss_instance.mu_prior[0].cpu().numpy()*np.ones(np.shape(X.flatten())),mi_loss_instance.mu_prior[1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
+        #     points = fX.reshape((100,100,4))
+        #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mi_loss_instance.mu_prior.cpu().numpy(), mi_loss_instance.Sigma_prior.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+        #     axs[0, 1].pcolor(X, Y, Z)
+        #     axs[0, 1].scatter(true_theta[0][1][0].cpu().numpy(),true_theta[0][1][1].cpu().numpy(), color='red', marker='x',label = 'True')
+        #     axs[0, 1].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+            
+        #     ######### Posterior on source 1 ###########################################################
+        #     fX, logJac = flow_post_theta.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),posterior_loc[0,2].cpu().numpy()*np.ones(np.shape(X.flatten())),posterior_loc[0,3].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
+        #     points = fX.reshape((100,100,4))
+        #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc[0].cpu().numpy(), torch.diag(posterior_scale[0]).cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+        #     axs[1, 0].pcolor(X, Y, Z)
+        #     axs[1, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
+        #     axs[1, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+        #     ######### Posterior on source 2 ###########################################################
+        #     fX, logJac = flow_post_theta.forward(torch.from_numpy((np.vstack((posterior_loc[0,0].cpu().numpy()*np.ones(np.shape(X.flatten())),posterior_loc[0,1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
+        #     points = fX.reshape((100,100,4))
+        #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc[0].cpu().numpy(), torch.diag(posterior_scale[0]).cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+        #     axs[1, 1].pcolor(X, Y, Z)
+        #     axs[1, 1].scatter(true_theta[0][1][0].cpu().numpy(),true_theta[0][1][1].cpu().numpy(), color='red', marker='x',label = 'True')
+        #     axs[1, 1].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+        #     axs[0, 0].title.set_text('Source 1')
+        #     axs[0, 1].title.set_text('Source 2')
+        #     axs[0, 0].set(ylabel='Prior')
+        #     axs[1, 0].set(ylabel='Posterior')
+        #     plt.show()
+            
+        # #### Plot From Trans Mean Value    
+        # with torch.no_grad():
+        #     import numpy as np
+        #     import scipy
+        #     import matplotlib.pyplot as plt
+        #     x = np.linspace(-2.5,2.5,100)
+        #     y = np.linspace(-2.5,2.5,100)
+        #     X, Y = np.meshgrid(x, y)
+        #     fig, axs = plt.subplots(2, 2)
+        #     ######### Prior on source 1 ###########################################################
+        #     fX, logJac = mi_loss_instance.fX_prior.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),mu_prior_trans[2].cpu().numpy()*np.ones(np.shape(X.flatten())),mu_prior_trans[3].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
+        #     points = fX.reshape((100,100,4))
+        #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mi_loss_instance.mu_prior.cpu().numpy(), mi_loss_instance.Sigma_prior.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+        #     axs[0, 0].pcolor(X, Y, Z)
+        #     axs[0, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
+        #     axs[0, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+        #     ######### Prior on source 2 ###########################################################
+        #     fX, logJac = mi_loss_instance.fX_prior.forward(torch.from_numpy((np.vstack((mu_prior_trans[0].cpu().numpy()*np.ones(np.shape(X.flatten())),mu_prior_trans[1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
+        #     points = fX.reshape((100,100,4))
+        #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mi_loss_instance.mu_prior.cpu().numpy(), mi_loss_instance.Sigma_prior.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+        #     axs[0, 1].pcolor(X, Y, Z)
+        #     axs[0, 1].scatter(true_theta[0][1][0].cpu().numpy(),true_theta[0][1][1].cpu().numpy(), color='red', marker='x',label = 'True')
+        #     axs[0, 1].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+            
+        #     ######### Posterior on source 1 ###########################################################
+        #     fX, logJac = flow_post_theta.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),mu_post_trans[0,2].cpu().numpy()*np.ones(np.shape(X.flatten())),mu_post_trans[0,3].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
+        #     points = fX.reshape((100,100,4))
+        #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc[0].cpu().numpy(), torch.diag(posterior_scale[0]).cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+        #     axs[1, 0].pcolor(X, Y, Z)
+        #     axs[1, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
+        #     axs[1, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+        #     ######### Posterior on source 2 ###########################################################
+        #     fX, logJac = flow_post_theta.forward(torch.from_numpy((np.vstack((mu_post_trans[0,0].cpu().numpy()*np.ones(np.shape(X.flatten())),mu_post_trans[0,1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
+        #     points = fX.reshape((100,100,4))
+        #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc[0].cpu().numpy(), torch.diag(posterior_scale[0]).cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+        #     axs[1, 1].pcolor(X, Y, Z)
+        #     axs[1, 1].scatter(true_theta[0][1][0].cpu().numpy(),true_theta[0][1][1].cpu().numpy(), color='red', marker='x',label = 'True')
+        #     axs[1, 1].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+        #     axs[0, 0].title.set_text('Source 1')
+        #     axs[0, 1].title.set_text('Source 2')
+        #     axs[0, 0].set(ylabel='Prior')
+        #     axs[1, 0].set(ylabel='Posterior')
+        #     plt.show()
         
         
         if not train_flow_every_step:
@@ -677,13 +767,13 @@ if __name__ == "__main__":
         "--num-parallel", help="Number of histories to run parallel", default=1, type=int
     )
     parser.add_argument("--num-experiments", default=10, type=int)
-    parser.add_argument("--batch-size", default=1024, type=int)
+    parser.add_argument("--batch-size", default=128, type=int)
     parser.add_argument("--device", default="cuda", type=str)
     parser.add_argument(
         "--mlflow-experiment-name", default="locfin_mm_variational", type=str
     )
     parser.add_argument("--lr-design", default=.005, type=float)
-    parser.add_argument("--lr-flow", default=.0005, type=float)
+    parser.add_argument("--lr-flow", default=.005, type=float)
     parser.add_argument("--annealing-scheme", nargs="+", default=[500,.9], type=float)
     parser.add_argument("--num-steps", default=5000, type=int)
     parser.add_argument("--train-flow-every-step", default=True, type=bool)
