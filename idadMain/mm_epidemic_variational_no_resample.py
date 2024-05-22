@@ -8,8 +8,8 @@ import pyro
 from tqdm import trange
 import mlflow
 import copy
-from neural.baselines import BatchDesignBaseline
-
+from neural.baselines import BatchDesignBaseline, DesignBaseline
+from torch import nn
 from experiment_tools.pyro_tools import auto_seed
 from oed.design import OED
 
@@ -51,61 +51,30 @@ class MomentMatchMarginalPosteriorTest(VariationalMutualInformationOptimizer):
 
         data = torch.cat([mufX,mugY],axis=1)
         
-        # Sigma = torch.cov(data.T)#cov(data)+1e-5*torch.eye(self.dim_lat+self.dim_obs, device=latents.device)
-        
-        # Sigma[:self.dim_lat,:self.dim_lat] = torch.diag(torch.diag(Sigma[:self.dim_lat,:self.dim_lat]))#torch.eye(self.dim_lat, device=latents.device)
-        # Sigma[1:4] = Sigma[1:4]-torch.outer(Sigma[1:4,0],Sigma[0]/Sigma[0,0]).detach()
-        # Sigma[2:4,1:] = Sigma[2:4,1:]-torch.outer(Sigma[2:4,1],Sigma[1,1:]/Sigma[1,1]).detach()
-        # Sigma[3:4,2:] = Sigma[3:4,2:]-torch.outer(Sigma[3:4,2],Sigma[2,2:]/Sigma[2,2]).detach()
-        # Sigma[:3,3:] = Sigma[:3,3:]-torch.outer(Sigma[:3,3],Sigma[3,3:]/Sigma[3,3]).detach()
-        # Sigma[:2,2:] = Sigma[:2,2:]-torch.outer(Sigma[:2,2],Sigma[2,2:]/Sigma[2,2]).detach()
-        # Sigma[:1,1:] = Sigma[:1,1:]-torch.outer(Sigma[:1,1],Sigma[1,1:]/Sigma[1,1]).detach()
-        # Sigma[-1,:-1] = Sigma[:-1,-1]
-        Sigma = torch.cov(data.T)#(.1*torch.cov(data.T)+.9*self.Sigma.detach())#
+        Sigma = torch.cov(data.T)+1e-5*torch.eye(self.dim_lat+self.dim_obs, device=latents.device)
         
         if torch.linalg.cond(Sigma) >400:
             cond_hold = 1
-        # chol_Sx = torch.linalg.cholesky(Sigma[:self.dim_lat,:self.dim_lat])
-        # chol_Sy = torch.linalg.cholesky(Sigma[self.dim_lat:,self.dim_lat:])
-        # Sigma1 = torch.eye(self.dim_lat+self.dim_obs, device=latents.device)
-        # Sigma1[self.dim_lat:,:self.dim_lat] = torch.linalg.solve(chol_Sy,torch.linalg.solve(chol_Sx,Sigma[:self.dim_lat,self.dim_lat:]).T)
-        # Sigma1[:self.dim_lat,self.dim_lat:] = Sigma1[self.dim_lat:,:self.dim_lat].T
         
         sign, logdetS  = torch.linalg.slogdet(Sigma)
         if sign < 0:
             print("negative det")
         self.hXY = .5*logdetS +((self.dim_lat+self.dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)-torch.mean(logDetJgY)
-        # self.hXY = .5*logdetS-torch.mean(logDetJfX)-torch.mean(logDetJgY)
-        # self.hXY = .5*torch.log(1-torch.sum(Sigma[self.dim_lat:,:self.dim_lat]**2)) +((self.dim_lat+self.dim_obs)/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)-torch.mean(logDetJgY)+torch.linalg.slogdet(Sigma1[:self.dim_lat,:self.dim_lat])[1]+torch.linalg.slogdet(Sigma1[self.dim_lat:,self.dim_lat:])[1]
+
 
         sign, logdetSx  = torch.linalg.slogdet(Sigma[:self.dim_lat,:self.dim_lat])
         if sign < 0:
             print("negative det")
         self.hX = .5*logdetSx+(self.dim_lat/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)
-        # self.hX = .5*logdetSx-torch.mean(logDetJfX)
-        # self.hX = (self.dim_lat/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)+torch.linalg.slogdet(Sigma1[:self.dim_lat,:self.dim_lat])[1]
         
         sign, logdetSy  = torch.linalg.slogdet(Sigma[self.dim_lat:,self.dim_lat:])
         if sign < 0:
             print("negative det")
         self.hY = .5*logdetSy +(self.dim_obs/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY)
-        # self.hY = .5*logdetSy-torch.mean(logDetJgY)
-        # self.hY = (self.dim_obs/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJgY)+torch.linalg.slogdet(Sigma1[self.dim_lat:,self.dim_lat:])[1]
-        
-        # CondSig = Sigma[:self.dim_lat,:self.dim_lat]-torch.matmul(Sigma[:self.dim_lat,self.dim_lat:],torch.linalg.solve(Sigma[self.dim_lat:,self.dim_lat:],Sigma[self.dim_lat:,:self.dim_lat]))
-        # sign, logdetCSy  = torch.linalg.slogdet(CondSig)
-        # if sign < 0:
-        #     print("negative det")
-        # hX_Y = .5*logdetCSy +(self.dim_lat/2)*(torch.log(2*self.pi_const*self.e_const))-torch.mean(logDetJfX)
-        
-        # save optimal parameters for decision
-        # mu1 = torch.mean(data,axis=0)
-        # mu1[:self.dim_lat] = torch.linalg.solve(chol_Sx.T,mu1[:self.dim_lat])#torch.linalg.solve(chol_Sx,torch.linalg.solve(chol_Sx.T,mu1[:self.dim_lat]))
-        # mu1[self.dim_lat:] = torch.linalg.solve(chol_Sy.T,mu1[self.dim_lat:])#torch.linalg.solve(chol_Sy,torch.linalg.solve(chol_Sy.T,mu1[self.dim_lat:]))
-        # self.mu = mu1
-        self.mu = torch.mean(data,axis=0)#(.1*torch.mean(data,axis=0)+.9*self.mu.detach())#
-        self.Sigma = Sigma#(Sigma+self.Sigma.detach())/2#
-        return (self.hXY-self.hY-self.hX)#-(self.hXY-2*self.hY)#
+
+        self.mu = torch.mean(data,axis=0)
+        self.Sigma = Sigma
+        return self.hXY - self.hX - self.hY
 
     def loss(self, *args, **kwargs):
         """
@@ -116,11 +85,40 @@ class MomentMatchMarginalPosteriorTest(VariationalMutualInformationOptimizer):
         loss_to_constant = torch_item(self.differentiable_loss(*args, **kwargs))
         return loss_to_constant
 
+class BatchDesignBaselineMean(DesignBaseline):
+    """
+    Batch design baseline: learns T constants.
+
+    - If trained with InfoNCE bound, this is the SG-BOED static baseline.
+    - If trained with the NWJ bound, this is the MINEBED static baselines.
+    """
+
+    def __init__(
+        self,
+        T,
+        design_dim,
+        output_activation=nn.Identity(),
+        design_init=torch.distributions.Normal(0, 0.5),#torch.zeros((1,1)),
+    ):
+        super().__init__(design_dim)
+        self.designs = nn.ParameterList(
+            [
+                nn.Parameter(design_init.sample())
+                for i in range(T)
+            ]
+        )
+        self.output_activation = output_activation
+
+    def forward(self, *design_obs_pairs):
+        j = len(design_obs_pairs)
+        return self.output_activation(self.designs[j])
+
 def optimise_design(
     posterior_loc,
     posterior_cov,
     flow_theta,
     flow_obs,
+    design_init,
     train_flow,
     run_flow,
     experiment_number,
@@ -134,14 +132,19 @@ def optimise_design(
     lr_flow,
     annealing_scheme=None,
 ):
-    design_init = (
-        torch.distributions.Normal(0.0, 0.01)
-        if experiment_number == 0
-        else torch.distributions.Normal(0.0, 1.0)
-    )
-    # design_init = torch.distributions.Normal(0.0, 0.01)
-    design_net = BatchDesignBaseline(
-        T=1, design_dim=(1, p), design_init=design_init
+    # design_init = (
+    #     torch.distributions.Normal(0.0, 0.01)
+    #     if experiment_number == 0
+    #     else torch.distributions.Normal(0.0, 1.0)
+    # )
+    # # design_init = torch.distributions.Normal(0.0, 0.01)
+    # design_net = BatchDesignBaseline(
+    #     T=1, design_dim=(1, p), design_init=design_init
+    # ).to(device)
+    
+    design_init_dist = torch.distributions.MultivariateNormal(design_init,.01*torch.eye(design_init.shape[0],device=device))#0.01
+    design_net = BatchDesignBaselineMean(
+        T=1, design_dim=(1, p), design_init=design_init_dist
     ).to(device)
 
 
@@ -166,7 +169,7 @@ def optimise_design(
             #     fX = SplineFlow(dim_x,n_flows=1,hidden_dims=[32], count_bins=64, bounds=4,order = 'quadratic', device=device)
             #     fX, flowx_loss= InitFlowToIdentity(dim_x, fX, bounds=4,lr=init_lr_x,device=device)
             #     init_lr_x *= .5
-            fX = SplineFlow(dim_x,n_flows=1,hidden_dims=[32], count_bins=128, bounds=4,order = 'quadratic', device=device)
+            fX = SplineFlow(dim_x,n_flows=1,hidden_dims=[8,8], count_bins=128, bounds=5,order = 'linear', device=device)
         else:
             fX = copy.deepcopy(flow_theta)
         if flow_obs == None:
@@ -176,7 +179,7 @@ def optimise_design(
             #     gY = SplineFlow(dim_y,count_bins=64, bounds=5,order = 'quadratic', device=device)
             #     gY, flowy_loss = InitFlowToIdentity(dim_y, gY, bounds=5,lr=init_lr_y,device=device)
             #     init_lr_y *= .5
-            gY = SplineFlow(dim_y,count_bins=128, bounds=5,order = 'quadratic', device=device)
+            gY = SplineFlow(dim_y,count_bins=128, bounds=5,order = 'linear', device=device)
         else:
             gY = copy.deepcopy(flow_obs)
             
@@ -199,11 +202,20 @@ def optimise_design(
     ### Set-up optimiser ###
     optimizer_design = torch.optim.Adam(ho_model.design_net.designs)
     annealing_freq, factor = annealing_scheme
-    scheduler_design = pyro.optim.ExponentialLR(
+    # scheduler_design = pyro.optim.ExponentialLR(
+    #     {
+    #         "optimizer": optimizer_design,
+    #         "optim_args": {"lr": lr_design},
+    #         "gamma" : factor,
+    #         "verbose": False,
+    #     }
+    # )
+    scheduler_design = pyro.optim.ReduceLROnPlateau(
         {
             "optimizer": optimizer_design,
             "optim_args": {"lr": lr_design},
-            "gamma" : factor,
+            "factor": .8,
+            "patience": 2,
             "verbose": False,
         }
     )
@@ -211,17 +223,27 @@ def optimise_design(
     if run_flow and train_flow:
         optimizer_flow = torch.optim.Adam(list(mi_loss_instance.fX.parameters())+list(mi_loss_instance.gY.parameters()))
         annealing_freq, factor = annealing_scheme
-        scheduler_flow = pyro.optim.ExponentialLR(
+        # scheduler_flow = pyro.optim.ExponentialLR(
+        #     {
+        #         "optimizer": optimizer_flow,
+        #         "optim_args": {"lr": lr_flow},
+        #         "gamma" : factor,
+        #         "verbose": False,
+        #     }
+        # )
+        scheduler_flow = pyro.optim.ReduceLROnPlateau(
             {
                 "optimizer": optimizer_flow,
                 "optim_args": {"lr": lr_flow},
-                "gamma" : factor,
+                "factor": .8,
+                "patience": 2,
                 "verbose": False,
             }
         )
-    
+        
     ### Optimise ###
     design_prev = 1*design_net.designs[0]
+    min_loss = torch.inf
     j=0
     loss_history = []
     num_steps_range = trange(0, num_steps + 0, desc="Loss: 0.000 ")
@@ -229,41 +251,50 @@ def optimise_design(
         optimizer_design.zero_grad()
         negMI = mi_loss_instance.differentiable_loss()
         negMI.backward(retain_graph=True)
-        optimizer_design.step()
+        # optimizer_design.step()
         if run_flow and train_flow:
             optimizer_flow.zero_grad()
             # # Log Likelihood Optimization
             mi_loss_instance.hXY.backward()
             # # Foster Bound Optimization
             # (mi_loss_instance.hX + mi_loss_instance.hXY - mi_loss_instance.hY).backward()
-            # # Test Bounds
-            # (mi_loss_instance.hXY + mi_loss_instance.hX).backward()
-            # (mi_loss_instance.hX + 2*mi_loss_instance.hXY - 2*mi_loss_instance.hY).backward()
-            # (mi_loss_instance.hX + mi_loss_instance.hY).backward()
             optimizer_flow.step()
         
         
         if i % 100 == 0:
-            num_steps_range.set_description("Loss: {:.3f} ".format(torch_item(negMI)))
-            loss_eval = mi_loss_instance.loss()#*args, **kwargs)
-            loss_history.append(loss_eval)
+            num_steps_range.set_description("Loss: {:.3f} ".format(torch_item(mi_loss_instance.hXY)))
+            # loss_eval = mi_loss_instance.loss()#*args, **kwargs)
+            loss_history.append(mi_loss_instance.hXY)
 
-        if i % annealing_freq == 0 and not i == 0:
-            scheduler_design.step()
+        # if i % annealing_freq == 0 and not i == 0:
+        #     scheduler_design.step()
+        #     if run_flow and train_flow:
+        #         scheduler_flow.step()
+        #     # scheduler.step(loss_eval)
+        # if i % 500 ==0 and not i == 0:
+        #     with torch.no_grad():
+        #         design_current = design_net.designs[0]
+        #         design_diff = torch.max((design_current-design_prev).pow(2).sum(axis=1).pow(.5))
+        #         if design_diff < 1e-2:
+        #             j+=1
+        #             if j>=2:
+        #                 break
+        #         else:
+        #             design_prev = 1*design_current
+        #             j=0
+        if i % 250 ==0 and not i == 0:
+            # with torch.no_grad():
+            #     if min_loss < mi_loss_instance.hXY:
+            #         j+=1
+            #         if j>=4:
+            #             break
+            #     else:
+            #         min_loss = 1*mi_loss_instance.hXY
+            #         j=0
+            scheduler_design.step(mi_loss_instance.hXY)
             if run_flow and train_flow:
-                scheduler_flow.step()
+                scheduler_flow.step(mi_loss_instance.hXY)
             # scheduler.step(loss_eval)
-        if i % 500 ==0 and not i == 0:
-            with torch.no_grad():
-                design_current = design_net.designs[0]
-                design_diff = torch.max((design_current-design_prev).pow(2).sum(axis=1).pow(.5))
-                if design_diff < 1e-2:
-                    j+=1
-                    if j>=2:
-                        break
-                else:
-                    design_prev = 1*design_current
-                    j=0
 
     return ho_model, mi_loss_instance, loss_history
 
@@ -291,15 +322,16 @@ def main_loop(
     train_flow = True
     prior = torch.distributions.MultivariateNormal(theta_loc, theta_covmat)
 
-    # sample true param
-    true_theta = torch.tensor([[[-0.3281,  0.2271, -0.0320,  0.9442]]], device=device)#prior.sample(torch.Size([1]))#torch.tensor([[[-0.1306, -1.6480,  0.3361,  0.9620]]], device=device)#
+    # sample true param 
+    true_theta = torch.tensor([[[-1.3, 1.45, -1.1, -1.5]]], device=device)#prior.sample(torch.Size([1]))#torch.tensor([[[-0.1306, -1.6480,  0.3361,  0.9620]]], device=device)#
     designs_so_far = []
     observations_so_far = []
 
     # Set posterior equal to the prior
     posterior_loc = theta_loc.reshape(-1)
     posterior_cov = torch.eye(p * num_sources, device=device)
-
+    design_init = torch.zeros(p,device=device)
+    design_init[0] = -1
     for t in range(0, T):
         t_start = time.time()
         print(f"Step {t + 1}/{T} of Run {run + 1}")
@@ -309,6 +341,7 @@ def main_loop(
             posterior_cov,
             flow_theta,
             flow_obs,
+            design_init,
             train_flow=train_flow,
             run_flow=run_flow,
             experiment_number=t,
@@ -344,6 +377,7 @@ def main_loop(
             # posterior_cov = torch.diag(torch.diag(posterior_cov))
             flow_theta = mi_loss_instance.fX
             flow_obs = mi_loss_instance.gY
+            design_init = torch.mean(max_posterior.reshape(p,num_sources),axis=0)
             # ## Plot From True
             # with torch.no_grad():
             #     import numpy as np
@@ -387,49 +421,49 @@ def main_loop(
             #     axs[0, 0].set(ylabel='Prior')
             #     axs[1, 0].set(ylabel='Posterior')
             #     plt.show()
-            # ## Plot From Mean
-            # with torch.no_grad():
-            #     import numpy as np
-            #     import scipy
-            #     import matplotlib.pyplot as plt
-            #     x = np.linspace(-2.5,2.5,100)
-            #     y = np.linspace(-2.5,2.5,100)
-            #     X, Y = np.meshgrid(x, y)
-            #     fig, axs = plt.subplots(2, 2)
-            #     ######### Prior on source 1 ###########################################################
-            #     fX, logJac = flow_theta.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),mux[2].cpu().numpy()*np.ones(np.shape(X.flatten())),mux[3].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
-            #     points = fX.reshape((100,100,4))
-            #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mux.cpu().numpy(), Sigmaxx.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
-            #     axs[0, 0].pcolor(X, Y, Z)
-            #     axs[0, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
-            #     axs[0, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
-            #     ######### Prior on source 2 ###########################################################
-            #     fX, logJac = flow_theta.forward(torch.from_numpy((np.vstack((mux[0].cpu().numpy()*np.ones(np.shape(X.flatten())),mux[1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
-            #     points = fX.reshape((100,100,4))
-            #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mux.cpu().numpy(), Sigmaxx.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
-            #     axs[0, 1].pcolor(X, Y, Z)
-            #     axs[0, 1].scatter(true_theta[0][0][2].cpu().numpy(),true_theta[0][0][3].cpu().numpy(), color='red', marker='x',label = 'True')
-            #     axs[0, 1].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+            ## Plot From Mean
+            with torch.no_grad():
+                import numpy as np
+                import scipy
+                import matplotlib.pyplot as plt
+                x = np.linspace(-2.5,2.5,100)
+                y = np.linspace(-2.5,2.5,100)
+                X, Y = np.meshgrid(x, y)
+                fig, axs = plt.subplots(2, 2)
+                ######### Prior on source 1 ###########################################################
+                fX, logJac = flow_theta.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),mux[2].cpu().numpy()*np.ones(np.shape(X.flatten())),mux[3].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
+                points = fX.reshape((100,100,4))
+                Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mux.cpu().numpy(), Sigmaxx.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+                axs[0, 0].pcolor(X, Y, Z)
+                axs[0, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
+                axs[0, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+                ######### Prior on source 2 ###########################################################
+                fX, logJac = flow_theta.forward(torch.from_numpy((np.vstack((mux[0].cpu().numpy()*np.ones(np.shape(X.flatten())),mux[1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
+                points = fX.reshape((100,100,4))
+                Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mux.cpu().numpy(), Sigmaxx.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+                axs[0, 1].pcolor(X, Y, Z)
+                axs[0, 1].scatter(true_theta[0][0][2].cpu().numpy(),true_theta[0][0][3].cpu().numpy(), color='red', marker='x',label = 'True')
+                axs[0, 1].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
                 
-            #     ######### Posterior on source 1 ###########################################################
-            #     fX, logJac = flow_theta.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),posterior_loc[2].cpu().numpy()*np.ones(np.shape(X.flatten())),posterior_loc[3].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
-            #     points = fX.reshape((100,100,4))
-            #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc.cpu().numpy(), posterior_cov.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
-            #     axs[1, 0].pcolor(X, Y, Z)
-            #     axs[1, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
-            #     axs[1, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
-            #     ######### Posterior on source 2 ###########################################################
-            #     fX, logJac = flow_theta.forward(torch.from_numpy((np.vstack((posterior_loc[0].cpu().numpy()*np.ones(np.shape(X.flatten())),posterior_loc[1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
-            #     points = fX.reshape((100,100,4))
-            #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc.cpu().numpy(), posterior_cov.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
-            #     axs[1, 1].pcolor(X, Y, Z)
-            #     axs[1, 1].scatter(true_theta[0][0][2].cpu().numpy(),true_theta[0][0][3].cpu().numpy(), color='red', marker='x',label = 'True')
-            #     axs[1, 1].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
-            #     axs[0, 0].title.set_text('Source 1')
-            #     axs[0, 1].title.set_text('Source 2')
-            #     axs[0, 0].set(ylabel='Prior')
-            #     axs[1, 0].set(ylabel='Posterior')
-            #     plt.show()
+                ######### Posterior on source 1 ###########################################################
+                fX, logJac = flow_theta.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),posterior_loc[2].cpu().numpy()*np.ones(np.shape(X.flatten())),posterior_loc[3].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
+                points = fX.reshape((100,100,4))
+                Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc.cpu().numpy(), posterior_cov.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+                axs[1, 0].pcolor(X, Y, Z)
+                axs[1, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
+                axs[1, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+                ######### Posterior on source 2 ###########################################################
+                fX, logJac = flow_theta.forward(torch.from_numpy((np.vstack((posterior_loc[0].cpu().numpy()*np.ones(np.shape(X.flatten())),posterior_loc[1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
+                points = fX.reshape((100,100,4))
+                Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc.cpu().numpy(), posterior_cov.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+                axs[1, 1].pcolor(X, Y, Z)
+                axs[1, 1].scatter(true_theta[0][0][2].cpu().numpy(),true_theta[0][0][3].cpu().numpy(), color='red', marker='x',label = 'True')
+                axs[1, 1].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+                axs[0, 0].title.set_text('Source 1')
+                axs[0, 1].title.set_text('Source 2')
+                axs[0, 0].set(ylabel='Prior')
+                axs[1, 0].set(ylabel='Posterior')
+                plt.show()
             # ## Plot From mean cross
             # with torch.no_grad():
             #     import numpy as np
@@ -474,41 +508,73 @@ def main_loop(
             #     axs[1, 0].set(ylabel='Posterior')
             #     plt.show()
             
+            # with torch.no_grad():
+            #     import numpy as np
+            #     import scipy
+            #     import matplotlib.pyplot as plt
+            #     x = np.linspace(-3.5,3.5,300)
+            #     y = np.linspace(-3.5,3.5,300)
+            #     X, Y = np.meshgrid(x, y)   
+            #     plt.rcParams.update({'font.size': 40})        
+            #     plt.figure(figsize=(10, 10))
+            #     fX, logJac = flow_theta.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),posterior_loc[2].cpu().numpy()*np.ones(np.shape(X.flatten())),posterior_loc[3].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
+            #     # fX, logJac = flow_theta.forward(torch.from_numpy((np.vstack((posterior_loc[0].cpu().numpy()*np.ones(np.shape(X.flatten())),posterior_loc[1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
+            #     points = fX.reshape((300,300,4))
+            #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc.cpu().numpy(), posterior_cov.cpu().numpy())*np.exp(logJac.reshape((300,300)).detach().cpu().numpy())
+            #     plt.pcolor(X, Y, Z)
+            #     pcol = plt.pcolormesh(X,Y,Z,linewidth=0,)
+            #     pcol.set_edgecolor('face')
+            #     # levels = np.linspace(0,1,50)
+            #     # cnt=plt.contourf(X, Y, Z, levels=levels, cmap='viridis')#
+            #     # for c in cnt.collections:
+            #     #     c.set_edgecolor("face")
+            #     plt.scatter(true_theta[0][0][2].cpu().numpy(),true_theta[0][0][3].cpu().numpy(), color='red', s=200,label = 'Sources')
+            #     plt.scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', s=200)
+            #     plt.scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='black', s=200,label = 'Design')
+            #     plt.title('JVG')
+            #     # plt.xlabel('X')
+            #     # plt.ylabel('Y')
+            #     plt.legend(loc="lower right")
+            #     # plt.colorbar()
+            #     plt.tight_layout()
+            #     plt.show()
+            #     plt.savefig('LocFinPostJVGNew.pdf')
+            
         t_end = time.time()
         run_time = t_end-t_start
 
         designs_so_far.append(design[0].detach().clone().cpu())
         observations_so_far.append(observation[0].cpu())
         
-        # extra_data = {}
-        # extra_data["mu"] = mi_loss_instance.mu.detach().clone().cpu().numpy()
-        # extra_data["sigmas"] = mi_loss_instance.Sigma.detach().clone().cpu().numpy()
-        # extra_data["flow_theta"] = copy.deepcopy(mi_loss_instance.fX).cpu()
-        # extra_data["flow_obs"] = copy.deepcopy(mi_loss_instance.gY).cpu()
-        # extra_data["posterior_loc"] = posterior_loc.cpu().numpy()
-        # extra_data["posterior_cov"] = posterior_cov.cpu().numpy()
-        # extra_data["total_time"] = run_time
-        # extra_data["design"] = design[0].detach().clone().cpu()
-        # extra_data["observations"] = observation[0].cpu()
+        extra_data = {}
+        extra_data["mu"] = mi_loss_instance.mu.detach().clone().cpu().numpy()
+        extra_data["sigmas"] = mi_loss_instance.Sigma.detach().clone().cpu().numpy()
+        extra_data["flow_theta"] = copy.deepcopy(mi_loss_instance.fX).cpu()
+        extra_data["flow_obs"] = copy.deepcopy(mi_loss_instance.gY).cpu()
+        extra_data["posterior_loc"] = posterior_loc.cpu().numpy()
+        extra_data["posterior_cov"] = posterior_cov.cpu().numpy()
+        extra_data["total_time"] = run_time
+        extra_data["design"] = design[0].detach().clone().cpu()
+        extra_data["observations"] = observation[0].cpu()
         
-        # path_to_run = path_to_extra_data + '/Run{}'.format(run)
-        # path_to_step = path_to_run + '/Step{}.pickle'.format(t)
-        # path_to_loss = path_to_run +'/Loss{}.pickle'.format(t)
-        # if not os.path.exists(path_to_run):
-        #     os.makedirs(path_to_run)
-        # with open(path_to_step, "wb") as f:
-        #     pickle.dump(extra_data, f)
-        # with open(path_to_loss, "wb") as f:
-        #     pickle.dump(loss_history, f)
-        # del extra_data
+        path_to_run = path_to_extra_data + '/Run{}'.format(run)
+        path_to_step = path_to_run + '/Step{}.pickle'.format(t)
+        path_to_loss = path_to_run +'/Loss{}.pickle'.format(t)
+        if not os.path.exists(path_to_run):
+            os.makedirs(path_to_run)
+        with open(path_to_step, "wb") as f:
+            pickle.dump(extra_data, f)
+        with open(path_to_loss, "wb") as f:
+            pickle.dump(loss_history, f)
+        del extra_data
         
         if not train_flow_every_step:
             train_flow = False
 
-        print(designs_so_far)
-        print(observations_so_far)
-        print(f"Fit mean  = {max_posterior}, cov = {torch.diag(posterior_cov)}")
-        print("True theta = ", true_theta.reshape(-1))
+        # print(designs_so_far)
+        # print(observations_so_far)
+        # print(f"Fit mean  = {max_posterior}, cov = {torch.diag(posterior_cov)}")
+        # print("True theta = ", true_theta.reshape(-1))
     print(f"Fitted posterior: mean = {max_posterior}, cov = {posterior_cov}")
     print("True theta = ", true_theta.reshape(-1))
 
@@ -568,9 +634,9 @@ def main(
     t = time.localtime()
     extra_data_id = time.strftime("%Y%m%d%H%M%S", t)
     path_to_extra_data = "./experiment_outputs/loc_fin/{}".format(extra_data_id)
-    # if not os.path.exists(path_to_extra_data):
-    #     os.makedirs(path_to_extra_data)
-    # print(path_to_extra_data)
+    if not os.path.exists(path_to_extra_data):
+        os.makedirs(path_to_extra_data)
+    print(path_to_extra_data)
 
     results_vi = {"loop": [], "seed": seed, "meta": meta}
     
@@ -606,17 +672,17 @@ def main(
         pickle.dump(results_vi, f)
     print("Path to artifact - use this when evaluating:\n", path_to_artifact)
     
-    # extra_meta = {
-    #     "train_flow_every_step": train_flow_every_step,
-    #     "run_flow": run_flow,
-    #     "ml_experiment_id":ml_info.experiment_id,
-    #     "ml_run_id":ml_info.run_id
-    # }
-    # path_to_extra_meta =path_to_extra_data + '/extra_meta.pickle'
-    # with open(path_to_extra_meta, "wb") as f:
-    #     pickle.dump(extra_meta, f)
-    # print(path_to_extra_data)
-    # print("Done.")
+    extra_meta = {
+        "train_flow_every_step": train_flow_every_step,
+        "run_flow": run_flow,
+        "ml_experiment_id":ml_info.experiment_id,
+        "ml_run_id":ml_info.run_id
+    }
+    path_to_extra_meta =path_to_extra_data + '/extra_meta.pickle'
+    with open(path_to_extra_meta, "wb") as f:
+        pickle.dump(extra_meta, f)
+    print(path_to_extra_data)
+    print("Done.")
     print("Evaluating Results")
     eval_from_source(
         path_to_artifact=path_to_artifact,
@@ -635,23 +701,23 @@ if __name__ == "__main__":
     parser.add_argument("--seed", default=-1, type=int)
     parser.add_argument("--physical-dim", default=2, type=int)
     parser.add_argument(
-        "--num-histories", help="Number of histories/rollouts", default=1, type=int
+        "--num-histories", help="Number of histories/rollouts", default=128, type=int
     )
     parser.add_argument(
         "--num-parallel", help="Number of histories to run parallel", default=1, type=int
     )
     parser.add_argument("--num-experiments", default=10, type=int)
-    parser.add_argument("--batch-size", default=1024, type=int)
+    parser.add_argument("--batch-size", default=256, type=int)
     parser.add_argument("--device", default="cuda", type=str)
     parser.add_argument(
         "--mlflow-experiment-name", default="locfin_mm_variational", type=str
     )
-    parser.add_argument("--lr-design", default=.0005, type=float)
-    parser.add_argument("--lr-flow", default=.0005, type=float)
+    parser.add_argument("--lr-design", default=.005, type=float)
+    parser.add_argument("--lr-flow", default=.005, type=float)
     parser.add_argument("--annealing-scheme", nargs="+", default=[500,.9], type=float)
     parser.add_argument("--num-steps", default=5000, type=int)
-    parser.add_argument("--train-flow-every-step", default=True, type=bool)
-    parser.add_argument("--run-flow", default=True, type=bool)
+    parser.add_argument("--train-flow-every-step", default=False, type=bool)
+    parser.add_argument("--run-flow", default=False, type=bool)
     
     args = parser.parse_args()
     main(

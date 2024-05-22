@@ -12,7 +12,7 @@ import os
 import scipy
 from matplotlib.pyplot import colorbar, pcolor, show, scatter
 import torch
-
+from eval_sPCE_from_source import eval_from_source
 ESTIMATOR_COLORS = {
     "TrueMI": "rgba(0,0,0,1.0)", # Black
     "FlowP": "rgba(204,0,0,1.0)", # Red
@@ -184,6 +184,7 @@ def plotLocationFinding(path_to_artifact):
     #         num_runs += 1
     num_runs = len(next(os.walk(path_to_artifact))[1])
     designs = np.zeros((2,num_runs))
+    times = np.zeros(num_runs)
     for i in range(num_runs):
         path_to_run = path_to_artifact + '/Run{}'.format(i)
         with open(path_to_artifact+'/extra_meta.pickle', "rb") as input_file:
@@ -193,62 +194,73 @@ def plotLocationFinding(path_to_artifact):
         with open(path_to_ml, "rb") as input_file:
             ml_info = pickle.load(input_file)
         true_theta = ml_info['loop'][0]['theta']
-        x = np.linspace(-3.5,3.5,100)
-        y = np.linspace(-3.5,3.5,100)
-        X, Y = np.meshgrid(x, y)
+        # x = np.linspace(-3.5,3.5,100)
+        # y = np.linspace(-3.5,3.5,100)
+        # X, Y = np.meshgrid(x, y)
         for j in range(10):
-            fig, axs = plt.subplots(2, 2)
             path_to_step = path_to_run+ '/Step{}.pickle'.format(j)
             with open(path_to_step, "rb") as input_file:
                 step_info = pickle.load(input_file)
-
-            post_mean = step_info['posterior_loc']
-            post_cov = step_info['posterior_cov']
-            prior_mean = step_info['mu'][:len(post_mean)]
-            prior_cov = step_info['sigmas'][:len(post_mean),:len(post_mean)]
-            flow_theta = step_info['flow_theta']
-            ######### Prior on source 1 ###########################################################
-            fX, logJac = step_info['flow_theta'](torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),true_theta[1,0].numpy()*np.ones(np.shape(X.flatten())),true_theta[1,1].numpy()*np.ones(np.shape(X.flatten())))).T)).float())
-            points = fX.reshape((100,100,4))
-            Z = scipy.stats.multivariate_normal.pdf(points.detach().numpy(), prior_mean, prior_cov)*np.exp(logJac.reshape((100,100)).detach().numpy())
-            axs[0, 0].pcolor(X, Y, Z)
-            axs[0, 0].scatter(true_theta[0,0].numpy(),true_theta[0,1].numpy(), color='red', marker='x',label = 'True')
-            # axs[k, l].scatter(true_theta[i][0],true_theta[i][1], color='red', marker='x')
-            axs[0, 0].scatter(step_info['design'][0][0].numpy()[0],step_info['design'][0][0].numpy()[1], color='green', marker='x',label = 'Design')
-            ######### Prior on source 2 ###########################################################
-            fX, logJac = step_info['flow_theta'](torch.from_numpy((np.vstack((true_theta[0,0].numpy()*np.ones(np.shape(X.flatten())),true_theta[0,1].numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float())
-            points = fX.reshape((100,100,4))
-            Z = scipy.stats.multivariate_normal.pdf(points.detach().numpy(), prior_mean, prior_cov)*np.exp(logJac.reshape((100,100)).detach().numpy())
-            axs[0, 1].pcolor(X, Y, Z)
-            axs[0, 1].scatter(true_theta[1,0].numpy(),true_theta[1,1].numpy(), color='red', marker='x',label = 'True')
-            # axs[k, l].scatter(true_theta[i][0],true_theta[i][1], color='red', marker='x')
-            axs[0, 1].scatter(step_info['design'][0][0].numpy()[0],step_info['design'][0][0].numpy()[1], color='green', marker='x',label = 'Design')
+            times[i]+=step_info['total_time']
+    mean_time = times.mean()
+    std_time = times.std()
+    print(mean_time)
+    print(std_time)
+    eval_from_source(
+    path_to_artifact=path_to_ml,
+    num_experiments_to_perform=[10],
+    num_inner_samples=int(5e5),
+    seed=-1,
+    device='cpu',
+    )
+            # fig, axs = plt.subplots(2, 2)
+            # post_mean = step_info['posterior_loc']
+            # post_cov = step_info['posterior_cov']
+            # prior_mean = step_info['mu'][:len(post_mean)]
+            # prior_cov = step_info['sigmas'][:len(post_mean),:len(post_mean)]
+            # flow_theta = step_info['flow_theta']
+            # ######### Prior on source 1 ###########################################################
+            # fX, logJac = step_info['flow_theta'](torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),true_theta[1,0].numpy()*np.ones(np.shape(X.flatten())),true_theta[1,1].numpy()*np.ones(np.shape(X.flatten())))).T)).float())
+            # points = fX.reshape((100,100,4))
+            # Z = scipy.stats.multivariate_normal.pdf(points.detach().numpy(), prior_mean, prior_cov)*np.exp(logJac.reshape((100,100)).detach().numpy())
+            # axs[0, 0].pcolor(X, Y, Z)
+            # axs[0, 0].scatter(true_theta[0,0].numpy(),true_theta[0,1].numpy(), color='red', marker='x',label = 'True')
+            # # axs[k, l].scatter(true_theta[i][0],true_theta[i][1], color='red', marker='x')
+            # axs[0, 0].scatter(step_info['design'][0][0].numpy()[0],step_info['design'][0][0].numpy()[1], color='green', marker='x',label = 'Design')
+            # ######### Prior on source 2 ###########################################################
+            # fX, logJac = step_info['flow_theta'](torch.from_numpy((np.vstack((true_theta[0,0].numpy()*np.ones(np.shape(X.flatten())),true_theta[0,1].numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float())
+            # points = fX.reshape((100,100,4))
+            # Z = scipy.stats.multivariate_normal.pdf(points.detach().numpy(), prior_mean, prior_cov)*np.exp(logJac.reshape((100,100)).detach().numpy())
+            # axs[0, 1].pcolor(X, Y, Z)
+            # axs[0, 1].scatter(true_theta[1,0].numpy(),true_theta[1,1].numpy(), color='red', marker='x',label = 'True')
+            # # axs[k, l].scatter(true_theta[i][0],true_theta[i][1], color='red', marker='x')
+            # axs[0, 1].scatter(step_info['design'][0][0].numpy()[0],step_info['design'][0][0].numpy()[1], color='green', marker='x',label = 'Design')
             
-            ######### Posterior on source 1 ###########################################################
-            fX, logJac = step_info['flow_theta'](torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),true_theta[1,0].numpy()*np.ones(np.shape(X.flatten())),true_theta[1,1].numpy()*np.ones(np.shape(X.flatten())))).T)).float())
-            points = fX.reshape((100,100,4))
-            Z = scipy.stats.multivariate_normal.pdf(points.detach().numpy(), post_mean, post_cov)*np.exp(logJac.reshape((100,100)).detach().numpy())
-            axs[1, 0].pcolor(X, Y, Z)
-            axs[1, 0].scatter(true_theta[0,0].numpy(),true_theta[0,1].numpy(), color='red', marker='x',label = 'True')
-            # axs[k, l].scatter(true_theta[i][0],true_theta[i][1], color='red', marker='x')
-            axs[1, 0].scatter(step_info['design'][0][0].numpy()[0],step_info['design'][0][0].numpy()[1], color='green', marker='x',label = 'Design')
-            ######### Posterior on source 2 ###########################################################
-            fX, logJac = step_info['flow_theta'](torch.from_numpy((np.vstack((true_theta[0,0].numpy()*np.ones(np.shape(X.flatten())),true_theta[0,1].numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float())
-            points = fX.reshape((100,100,4))
-            Z = scipy.stats.multivariate_normal.pdf(points.detach().numpy(), post_mean, post_cov)*np.exp(logJac.reshape((100,100)).detach().numpy())
-            axs[1, 1].pcolor(X, Y, Z)
-            axs[1, 1].scatter(true_theta[1,0].numpy(),true_theta[1,1].numpy(), color='red', marker='x',label = 'True')
-            # axs[k, l].scatter(true_theta[i][0],true_theta[i][1], color='red', marker='x')
-            axs[1, 1].scatter(step_info['design'][0][0].numpy()[0],step_info['design'][0][0].numpy()[1], color='green', marker='x',label = 'Design')
-            axs[0, 0].title.set_text('Source 1')
-            axs[0, 1].title.set_text('Source 2')
-            axs[0, 0].set(ylabel='Prior')
-            axs[1, 0].set(ylabel='Posterior')
-            plt.legend()#loc='center left', bbox_to_anchor=(1, 0.5)
-            fig.suptitle('Step {}'.format(j))
-            plt.tight_layout()
-            plt.savefig(path_to_run+'/plot{}.pdf'.format(j))
-            plt.close()
+            # ######### Posterior on source 1 ###########################################################
+            # fX, logJac = step_info['flow_theta'](torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),true_theta[1,0].numpy()*np.ones(np.shape(X.flatten())),true_theta[1,1].numpy()*np.ones(np.shape(X.flatten())))).T)).float())
+            # points = fX.reshape((100,100,4))
+            # Z = scipy.stats.multivariate_normal.pdf(points.detach().numpy(), post_mean, post_cov)*np.exp(logJac.reshape((100,100)).detach().numpy())
+            # axs[1, 0].pcolor(X, Y, Z)
+            # axs[1, 0].scatter(true_theta[0,0].numpy(),true_theta[0,1].numpy(), color='red', marker='x',label = 'True')
+            # # axs[k, l].scatter(true_theta[i][0],true_theta[i][1], color='red', marker='x')
+            # axs[1, 0].scatter(step_info['design'][0][0].numpy()[0],step_info['design'][0][0].numpy()[1], color='green', marker='x',label = 'Design')
+            # ######### Posterior on source 2 ###########################################################
+            # fX, logJac = step_info['flow_theta'](torch.from_numpy((np.vstack((true_theta[0,0].numpy()*np.ones(np.shape(X.flatten())),true_theta[0,1].numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float())
+            # points = fX.reshape((100,100,4))
+            # Z = scipy.stats.multivariate_normal.pdf(points.detach().numpy(), post_mean, post_cov)*np.exp(logJac.reshape((100,100)).detach().numpy())
+            # axs[1, 1].pcolor(X, Y, Z)
+            # axs[1, 1].scatter(true_theta[1,0].numpy(),true_theta[1,1].numpy(), color='red', marker='x',label = 'True')
+            # # axs[k, l].scatter(true_theta[i][0],true_theta[i][1], color='red', marker='x')
+            # axs[1, 1].scatter(step_info['design'][0][0].numpy()[0],step_info['design'][0][0].numpy()[1], color='green', marker='x',label = 'Design')
+            # axs[0, 0].title.set_text('Source 1')
+            # axs[0, 1].title.set_text('Source 2')
+            # axs[0, 0].set(ylabel='Prior')
+            # axs[1, 0].set(ylabel='Posterior')
+            # plt.legend()#loc='center left', bbox_to_anchor=(1, 0.5)
+            # fig.suptitle('Step {}'.format(j))
+            # plt.tight_layout()
+            # plt.savefig(path_to_run+'/plot{}.pdf'.format(j))
+            # plt.close()
         # for j in range(10):
         #     path_to_step = path_to_run+ '/Step{}.pickle'.format(j)
         #     with open(path_to_step, "rb") as input_file:
@@ -348,69 +360,93 @@ def main(path_to_artifact):
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluation")
-    parser.add_argument("--path-to-artifact", default="experiment_outputs/SIR/20240418100716", type=str)
-    ### Loc FIn
-    # mlruns/145551772296899500/d3fceeecf790419793e42374817f23f6/artifacts/results_locfin_mm_vi.pickle
-    # experiment_outputs/loc_fin/20240229231620
+    parser.add_argument("--path-to-artifact", default="experiment_outputs/loc_fin/20240520132743", type=str)
+    ################## location finding ###################################################
+    ################## fullrun ########################
+    ##### JVG ##############
+    ## True Prior
+    ## "experiment_outputs/loc_fin/20240520195707" (Time: [ +- ]  EIG: [ +- ]) (3214627) "mlruns/145551772296899500/c7060deeb88e48148ce95cd2c1373660/artifacts/results_locfin_mm_vi.pickle"
+    # "experiment_outputs/loc_fin/20240521022230" (Time: [577.687 +- 25.528]  EIG: [3.895481 +- 0.180756]) (3215127) (slower decay rate) "mlruns/145551772296899500/62ccfcabe68248219a4d0d7f4c17826e/artifacts/results_locfin_mm_vi.pickle"
     
-    # Gauss SIR
-    # (random init)
-    # experiment_outputs/SIR/20240418091526
-    # experiment_outputs/SIR/20240418092544
-    # (fixed init)
-    # experiment_outputs/SIR/20240418095723
+    ## False Prior
+    ## "experiment_outputs/loc_fin/20240520153133" (Time: [ +- ]  EIG: [ +- ]) (3213161) "mlruns/145551772296899500/fb7a8a03e2bb4fc58fdd48da0157b0a9/artifacts/results_locfin_mm_vi.pickle"
+    # "experiment_outputs/loc_fin/20240521054906" (Time: [594.194 +- 24.918]  EIG: [3.478048 +- 0.170425]) (3215132) (slower decay rate) "mlruns/145551772296899500/a3032bbd9d844e68b828280cf93a62fb/artifacts/results_locfin_mm_vi.pickle"
     
-    # Flow SIR
-    # (random init) experiment_outputs/SIR/20240418100915
-    # experiment_outputs/SIR/20240418092033
-    # (fixed init) experiment_outputs/SIR/20240418100716
-    #
+    ##### NVG ##############
+    ## True Prior
+    ## "experiment_outputs/loc_fin/20240520190123" (Time: [ +- ]  EIG: [ +- ]) (3214325) "mlruns/145551772296899500/b72bee0b33d4468986cfaad239f35f47/artifacts/results_locfin_vi.pickle"
+    # "experiment_outputs/loc_fin/20240521022335" (Time: [467.358 +- 12.817]  EIG: [4.074939 +- 0.165542]) (3215129) (slower decay rate) "mlruns/145551772296899500/b8a7ba3646c54fb69c16355d35a742f2/artifacts/results_locfin_vi.pickle"
+    # "experiment_outputs/loc_fin/20240521165632" (Time: [624.707 +- 18.271]  EIG: [4.550186 +- 0.175854]) (3216149) (original network) "mlruns/145551772296899500/e7e89330c9fe431f8b6f7717eb3deb37/artifacts/results_locfin_vi.pickle"
     
-    # First Flow: (9142547)  "experiment_outputs/SIR/20240219152500"
-    # Decision:   (9145135)  "experiment_outputs/SIR/20240219210049"
-    # lr = 0.01: (9145413)   "experiment_outputs/SIR/20240219222404"
+    ## False Prior
+    ## "experiment_outputs/loc_fin/20240520153048" (Time: [ +- ]  EIG: [ +- ]) (3213158) "mlruns/145551772296899500/a73607108c3c4e5f88dd30109c94c6ad/artifacts/results_locfin_vi.pickle"
+    ## "experiment_outputs/loc_fin/20240521063344" (Time: [ +- ]  EIG: [ +- ]) (3215133) (slower decay rate) "mlruns/145551772296899500/4aa5dd55deb348ad935ec091436b36bd/artifacts/results_locfin_vi.pickle"
+    # "experiment_outputs/loc_fin/20240521185827" (Time: [557.548 +- 17.562]  EIG: [3.992774 +- 0.172565]) (3216416) (original network) "mlruns/145551772296899500/1568bbd5a06f45b89327bad3dbc403b9/artifacts/results_locfin_vi.pickle"
     
-    # All Flow: (9142101)    "experiment_outputs/SIR/20240219150912"
-    # Decision: (9143766)    "experiment_outputs/SIR/20240219193513"
-    # lr = 0.01: (9145525)   "experiment_outputs/SIR/20240219230339"
+    ##### JVF ##############
+    ## True Prior
+    # "experiment_outputs/loc_fin/20240520153548" (Time: [3790.747 +- 116.514]  EIG: [4.146697 +- 0.186421]) (3213215) "mlruns/145551772296899500/b35a83c9d2084278b521ad36c05bf9f9/artifacts/results_locfin_mm_vi.pickle"
+    # "experiment_outputs/loc_fin/20240521022213" (Time: [3469.818 +- 118.225]  EIG: [4.280338 +- 0.17536]) (3215126) (slower decay rate) "mlruns/145551772296899500/2b589d45ca1c4a0991dd972ffcbfb3fa/artifacts/results_locfin_mm_vi.pickle"
     
-    # Fixed
-    # First Flow: (9160456)  "experiment_outputs/SIR/20240221114200"
-    #             (9182528)  "experiment_outputs/SIR/20240223135736"
-    # (lr=.0005)  (9183084)  "experiment_outputs/SIR/20240223161220"
+    ## False Prior
+    # "experiment_outputs/loc_fin/20240520152944" (Time: [3728.630 +- 111.319]  EIG: [3.935164 +- 0.196292]) (3213156) "mlruns/145551772296899500/929ae41b9f3a4a6eacc6f2f29ca90712/artifacts/results_locfin_mm_vi.pickle"
+    # "experiment_outputs/loc_fin/20240521023331" (Time: [3685.134 +- 107.365]  EIG: [3.777488 +- 0.179521]) (3215130) (slower decay rate) "mlruns/145551772296899500/b98364d6df8640dcb5d694a7f7b2be6f/artifacts/results_locfin_mm_vi.pickle"
     
-    # All Flow:   (9160369)  "experiment_outputs/SIR/20240221104357"
-    #             (9182526)  "experiment_outputs/SIR/20240223135622"
-    # (lr=.0005)  (9183150)  "experiment_outputs/SIR/20240223163918"
+    ##### NVF ##############
+    ## True Prior
+    # "experiment_outputs/loc_fin/20240520181046" (Time: [2792.940 +- 84.300]  EIG: [4.755394 +- 0.193923]) (3214098) "mlruns/145551772296899500/9158cc9acf364503ae7dc15ad6dbf2dc/artifacts/results_locfin_vi.pickle"
+    # "experiment_outputs/loc_fin/20240521022307" (Time: [3073.663 +- 81.928]  EIG: [5.106241 +- 0.197699]) (3215128) (slower decay rate) "mlruns/145551772296899500/702d8911c27249d796a0ec25083e7a40/artifacts/results_locfin_vi.pickle"
+    #R "experiment_outputs/loc_fin/20240521104114" (Time: [2956.524 +- 94.549]  EIG: [5.111974 +-  0.184681]) (3215326) (original network) "mlruns/145551772296899500/bc6fe7d110524805803bd866b027db56/artifacts/results_locfin_vi.pickle"
     
-    # Gauss Sir:  (9182530)  "experiment_outputs/SIR/20240223135828"
-    # (lr=.0005)  (9183082)  "experiment_outputs/SIR/20240223161048"
+    ## False Prior
+    # "experiment_outputs/loc_fin/20240520153010" (Time: [2881.031 +- 83.221]  EIG: [4.380203 +- 0.185274]) (3213157) "mlruns/145551772296899500/a741868894be4583b72b230ee39746e9/artifacts/results_locfin_vi.pickle"
+    # "experiment_outputs/loc_fin/20240521023356" (Time: [2998.682 +- 85.785]  EIG: [4.214872 +- 0.178373]) (3215131) (slower decay rate) "mlruns/145551772296899500/2719721cd40741eda21f9f401bbac01d/artifacts/results_locfin_vi.pickle"
+    ### "" (3215327) (original network) 
     
-    # "experiment_outputs/loc_fin/20240211104331"
+    ################## Early Stopping ########################
+    ##### JVG ##############
+    ## True Prior
+    ## "experiment_outputs/loc_fin/20240519162648" (Time: [ +- ]  EIG: [ +- ]) (3210177) "mlruns/145551772296899500/6f788395a94c4937853d89839e4f1712/artifacts/results_locfin_mm_vi.pickle"
+    # "experiment_outputs/loc_fin/20240519233857" (Time: [ \pm ]  EIG: [3.775533 +- 0.195]) (3210255) "mlruns/145551772296899500/88ce96eb434d42f0ac5e0fb7018ae34f/artifacts/results_locfin_mm_vi.pickle"
+    #SSSS "experiment_outputs/loc_fin/20240520112207" (Time: [286.629 \pm 35.306]  EIG: [3.556697 \pm 0.19287]) (3210388) "mlruns/145551772296899500/4daef82038544a95b121e3baeaf5ffbb/artifacts/results_locfin_mm_vi.pickle"
     
-    ##
-    # 2 flow (9192562) "experiment_outputs/SIR/20240226003537"
-    # norm (9192532) "experiment_outputs/SIR/20240226001242"
+    ## False Prior
+    ##SSSS "experiment_outputs/loc_fin/20240520024635" (Time: [ \pm ]  EIG: [3.585144 \pm 0.149617]) (3210266) "mlruns/145551772296899500/e3eb072226c045f0bdd2301d3f6230ae/artifacts/results_locfin_mm_vi.pickle"
+    ## "experiment_outputs/loc_fin/20240520123941" (Time: [ \pm ]  EIG: [3.773447 \pm 0.179452])(3210416) "mlruns/145551772296899500/df98d2fa64ea47dab7b59bf187665868/artifacts/results_locfin_mm_vi.pickle"
     
-    # (9199605) "experiment_outputs/SIR/20240226101311"
+    ##### NVG ##############
+    ## True Prior
+    # "experiment_outputs/loc_fin/20240519193056" (Time: [182.873 \pm 20.669]  EIG: [3.830811 \pm 0.177804]) (3210216) "mlruns/145551772296899500/cd8e0f1e41fc4999b1315d68bec433f1/artifacts/results_locfin_vi.pickle"
+    # SSS"experiment_outputs/loc_fin/20240519210154" (Time: [185.906 \pm 21.418]  EIG: [4.607234 \pm 0.192131]) (3210229) "mlruns/145551772296899500/ea1fde1fce0d484abdfa31d4b6511211/artifacts/results_locfin_vi.pickle"
+    # "experiment_outputs/loc_fin/20240520111814" (Time: [182.566 \pm 20.625]  EIG: [4.381109 \pm 0.181779]) (3210383) "mlruns/145551772296899500/8450216ceac7475aa83c2df60146f04c/artifacts/results_locfin_vi.pickle"
     
-    #####
-    # Allflow "experiment_outputs/SIR/20240225203634" (9190377) Any Init lr=.0005 lr_f=.0001 
-    # Allflow "experiment_outputs/SIR/20240225203541" (9190376) Any Init lr=.001 lr_f=.0001 
-    # Allflow "experiment_outputs/SIR/20240225203940" (9190389) Start Init lr=.0005 lr_f=.0001
-    # Allflow "experiment_outputs/SIR/20240225203740" (9190378) Start Init lr=.001 lr_f=.0001 
+    ## False Prior
+    ## SSSS"experiment_outputs/loc_fin/20240520021351" (Time: [ \pm ]  EIG: [ 3.994429\pm 0.202681]) (3210265) "mlruns/145551772296899500/1e52163efe0443c4842db136fc993239/artifacts/results_locfin_vi.pickle"
+    ## "experiment_outputs/loc_fin/20240520123113" (3210414) "mlruns/145551772296899500/4807db276e0a47dc872b7d76e587fb01/artifacts/results_locfin_vi.pickle"
     
-    # (9209688) "experiment_outputs/SIR/20240226190011"
-    # (9209676) "experiment_outputs/SIR/20240226185655"
+    ##### JVF ##############
+    ## True Prior
+    # "experiment_outputs/loc_fin/20240519165801" (Time: [2362.777 \pm 271.661]  EIG: [4.315582 \pm 0.174397]) (3210184) "mlruns/145551772296899500/78369b957a354953a4118c59cd145186/artifacts/results_locfin_mm_vi.pickle"
+    # "experiment_outputs/loc_fin/20240519191615" (Time: [2337.478 \pm 237.500]  EIG: [4.146299 \pm 0.169304]) (3210212) "mlruns/145551772296899500/e61150bf0d93405bb9c9932d62fb15eb/artifacts/results_locfin_mm_vi.pickle"
+    # "experiment_outputs/loc_fin/20240519231127" (Time: [2001.140 \pm 225.670]  EIG: [4.09795 \pm 0.160508]) (3210252) "mlruns/145551772296899500/e285729a049c48969dc36dffe8bc6e7d/artifacts/results_locfin_mm_vi.pickle"
+    # SSSS"experiment_outputs/loc_fin/20240520112250" (Time: [1730 \pm 207]  EIG: [4.30 \pm 0.19]) (3210390) "mlruns/145551772296899500/ea1d69be5dd846ae8ce8693ee24aec2f/artifacts/results_locfin_mm_vi.pickle"
     
+    ## False Prior
+    # "experiment_outputs/loc_fin/20240520002925" (Time: [2004.165 \pm 211.417]  EIG: [3.84275 \pm 0.184771]) (3210259) "mlruns/145551772296899500/208b943d523f4b658aab57a457fcfece/artifacts/results_locfin_mm_vi.pickle"
+    # "experiment_outputs/loc_fin/20240520034258" (Time: [1962.742 \pm 221.455]  EIG: [ \pm ]) (3210267) "mlruns/145551772296899500/e033ba9b08f94485a1df4c0f36d93317/artifacts/results_locfin_mm_vi.pickle"
+    # SSSS"experiment_outputs/loc_fin/20240520132743" (Time: [1730 \pm 207]  EIG: [ 3.849171\pm  0.185747]) (3210417) "mlruns/145551772296899500/95b9089ed8864eeebea76da55d2b1c27/artifacts/results_locfin_mm_vi.pickle"
     
+    ##### NVF ##############
+    ## True Prior
+    # "experiment_outputs/loc_fin/20240519193116" (Time: [1302.222 \pm 159.831]  EIG: [4.500601 \pm 0.162272]) (3210217) "mlruns/145551772296899500/b7575100d8424aa584c76f0a263e3742/artifacts/results_locfin_vi.pickle"
+    # "experiment_outputs/loc_fin/20240519210300" (Time: [1267.083 \pm 147.285]  EIG: [4.654656 \pm 0.176478]) (3210230) "mlruns/145551772296899500/8dc93ba9a2374927a43df57639f5e74a/artifacts/results_locfin_vi.pickle"
+    #SSSS "experiment_outputs/loc_fin/20240519225257" (Time: [1253.626 \pm 155.220]  EIG: [5.104215 \pm 0.197219]) (3210249) "mlruns/145551772296899500/b9ade313113b49b98292a47e8be2f194/artifacts/results_locfin_vi.pickle"
+    # "experiment_outputs/loc_fin/20240520111935" (Time: [1218.018 \pm 152.688]  EIG: [5.331629 \pm 0.183142]) (3210384) "mlruns/145551772296899500/84c28b189a734bcc9e82fd7e6d2480ae/artifacts/results_locfin_vi.pickle"
     
-    ######
-    # (9212651) (lr = 1e-5, lr_f = 5e-3)  "experiment_outputs/SIR/20240227100145" NaN in samples
-    # (9212682) (lr = 1e-6, lr_f = 5e-3)  "experiment_outputs/SIR/20240227100644"
-    # (9212781) (lr = 1e-5, Gauss)        "experiment_outputs/SIR/20240227102152"
-    # (9215546) (lr = 1e-5, lr_f = 5e-4)  "experiment_outputs/SIR/20240227191654"
-    # (9215696) (lr = 1e-5, Gauss)        "experiment_outputs/SIR/20240227200703"
+    ## False Prior
+    #SSSS "experiment_outputs/loc_fin/20240520052531" (Time: [1261.625 \pm 158.008]  EIG: [4.748 \pm 0.18342]) (3210260) "mlruns/145551772296899500/be9c8719ecee4fb385e368b9157b35fd/artifacts/results_locfin_vi.pickle"
+    # "experiment_outputs/loc_fin/20240520123155" (3210415) "mlruns/145551772296899500/4e21122212f241fe97a8c6652a67e162/artifacts/results_locfin_vi.pickle"
+    
     args = parser.parse_args()
 
     main(path_to_artifact=args.path_to_artifact)

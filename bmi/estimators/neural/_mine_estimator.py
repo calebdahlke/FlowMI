@@ -142,7 +142,7 @@ def mine_training(
     batch_size: Optional[int] = 256,
     test_every_n_steps: int = 250,
     max_n_steps: int = 2_000,
-    early_stopping: bool = False,
+    early_stopping: bool = True,
     learning_rate: float = 0.1,
     verbose: bool = False,
 ) -> tuple[TrainingLog, eqx.Module]:

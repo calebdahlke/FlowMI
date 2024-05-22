@@ -55,8 +55,9 @@ def evaluate_parallel_run(i,
                         lr,
                         test_every_n_steps,
                         method_names):
-    X, Y = task.sample(num_samples, seed=seed+i)
-    # print(task.mutual_information)
+    X, Y = task.sample((task.dim_x+task.dim_y)*num_samples, seed=seed+i)
+    # X, Y = task.sample(10000, seed=seed+i)
+    print(task.mutual_information)
     run = {}
     if 'JointGauss' in method_names:
         JointGauss = JointVariationalEstimator(dim_x=task.dim_x,dim_y=task.dim_y,use_flow=False,batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
@@ -64,8 +65,8 @@ def evaluate_parallel_run(i,
         run['JointGauss'] = JointGaussResults
         
     if 'NeuralGauss' in method_names:
-        NeuralGauss = NeuralVariationalEstimator(dim_x=task.dim_y,dim_y=task.dim_x,use_flow=False,batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
-        NeuralGaussResults = NeuralGauss.estimate_with_info(Y,X)
+        NeuralGauss = NeuralVariationalEstimator(dim_x=task.dim_x,dim_y=task.dim_y,use_flow=False,batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
+        NeuralGaussResults = NeuralGauss.estimate_with_info(X,Y)
         run['NeuralGauss'] = NeuralGaussResults
         
     if 'JointFlow' in method_names:
@@ -74,27 +75,27 @@ def evaluate_parallel_run(i,
         run['JointFlow'] = JointFlowResults
         
     if 'NeuralFlow' in method_names:
-        NeuralFlow = NeuralVariationalEstimator(dim_x=task.dim_y,dim_y=task.dim_x,use_flow=True,batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
-        NeuralFlowResults = NeuralFlow.estimate_with_info(Y,X)
+        NeuralFlow = NeuralVariationalEstimator(dim_x=task.dim_x,dim_y=task.dim_y,use_flow=True,batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
+        NeuralFlowResults = NeuralFlow.estimate_with_info(X,Y)
         run['NeuralFlow'] = NeuralFlowResults
         
     if 'MINE' in method_names:
-        mine = bmi.estimators.MINEEstimator(batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
+        mine = bmi.estimators.MINEEstimator()#batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
         mineResults = mine.estimate_with_info(X,Y)
         run['MINE'] = mineResults #mineResults.mi_estimate
     
     if 'InfoNCE' in method_names:
-        InfoNCE = bmi.estimators.InfoNCEEstimator(batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
+        InfoNCE = bmi.estimators.InfoNCEEstimator()#batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
         InfoNCEResults = InfoNCE.estimate_with_info(X,Y)
         run['InfoNCE'] = InfoNCEResults#InfoNCEResults.mi_estimate
     
     if 'NWJ' in method_names:
-        NWJ = bmi.estimators.NWJEstimator(batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
+        NWJ = bmi.estimators.NWJEstimator()#batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
         NWJResults = NWJ.estimate_with_info(X,Y)
         run['NWJ'] = NWJResults#NWJResults.mi_estimate
     
     if 'DV' in method_names:
-        DV = bmi.estimators.DonskerVaradhanEstimator(batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
+        DV = bmi.estimators.DonskerVaradhanEstimator()#batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)
         DVResults = DV.estimate_with_info(X,Y)
         run['DV'] = DVResults#DVResults.mi_estimate
         
@@ -126,19 +127,19 @@ def evaluate_parallel_task(j,
     task = bmi.benchmark.BENCHMARK_TASKS[task_list[j]]
     runs = {}
     runs[task_list[j]] = task.mutual_information
-    with parallel_backend("loky", inner_max_num_threads=10):
-        results = Parallel(n_jobs=10)(delayed(evaluate_parallel_run)(i,
-                                                        seed,
-                                                        task,
-                                                        num_samples,
-                                                        train_test_split,
-                                                        batch_size,
-                                                        num_steps,
-                                                        lr,
-                                                        test_every_n_steps,
-                                                        method_names
-                                                        ) for i in range(num_runs))
-    
+    # with parallel_backend("loky", inner_max_num_threads=10):
+    results = Parallel(n_jobs=1)(delayed(evaluate_parallel_run)(i,
+                                                    seed,
+                                                    task,
+                                                    num_samples,
+                                                    train_test_split,
+                                                    batch_size,
+                                                    num_steps,
+                                                    lr,
+                                                    test_every_n_steps,
+                                                    method_names
+                                                    ) for i in range(num_runs))
+        
     # results = []
     # for i in range(num_runs):
     #     resulti = evaluate_parallel_run(i,
@@ -231,23 +232,22 @@ if __name__ == "__main__":
     parser.add_argument(
         "--experiment-name", default="BenchmarkMI", type=str
     )
-    parser.add_argument("--seed", default=42, type=int)
+    parser.add_argument("--seed", default=42, type=int)#7256
     parser.add_argument("--device", default="cpu", type=str)#"cuda"
     
-    parser.add_argument("--task_list", default=TASKS, type=list)#TASKS#['multinormal-dense-5-5-0.5']['asinh-student-identity-5-5-2']['1v1-normal-0.75']['1v1-additive-0.75']['asinh-student-identity-2-2-1']['swissroll_x-normal_cdf-1v1-normal-0.75']['spiral-multinormal-sparse-3-3-2-2.0']
+    parser.add_argument("--task_list", default=['swissroll_x-normal_cdf-1v1-normal-0.75'], type=list)#TASKS#['multinormal-sparse-2-2-2-2.0']['1v1-additive-0.75']['asinh-student-identity-2-2-1']
+    # ['half_cube-multinormal-sparse-25-25-2-2.0']['multinormal-dense-5-5-0.5']['swissroll_x-normal_cdf-1v1-normal-0.75']['asinh-student-identity-5-5-2']['spiral-multinormal-sparse-3-3-2-2.0']
+    parser.add_argument("--num_runs", default=1, type=int)#10 
     
-    parser.add_argument("--num_runs", default=10, type=int)#10
-    
-    parser.add_argument("--num_samples", default=10000, type=int)
-    parser.add_argument("--train_test_split", default=.8, type=float)#.8
+    parser.add_argument("--num_samples", default=1000, type=int)
+    parser.add_argument("--train_test_split", default=.5, type=float)#.8
     parser.add_argument("--batch_size", default=256, type=int)#256
-    parser.add_argument("--test_every_n_steps", default=1500, type=int)#1000
+    parser.add_argument("--test_every_n_steps", default=250, type=int)#250
     
-    parser.add_argument("--lr", default=0.001, type=float)#.002
-    parser.add_argument("--num_steps", default=3000, type=int)#10000
+    parser.add_argument("--lr", default=0.005, type=float)#.001
+    parser.add_argument("--num_steps", default=10000, type=int)
     
-    # Method_Names = ['FlowMP', 'MPGauss', 'MINE', 'InfoNCE', 'NWJ', 'DV', 'CCA', 'KSG']
-    Method_Names = ['JointGauss','NeuralGauss','JointFlow','NeuralFlow', 'MINE', 'InfoNCE', 'NWJ', 'DV', 'CCA', 'KSG']#['NeuralFlow']#['NeuralGauss']#['JointFlow']#
+    Method_Names = ['NeuralGauss','NeuralFlow']#['JointGauss','NeuralGauss','JointFlow','NeuralFlow', 'MINE', 'InfoNCE', 'NWJ', 'DV', 'CCA', 'KSG']#
     parser.add_argument("--method_names", default=Method_Names, type=list)
     
 

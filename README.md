@@ -16,13 +16,13 @@ conda install python=3.10
 
 ## Requirements for Beyond Gaussian Benchmark/McAlester
 ```bash
-pip install flowjax
+pip install flowjax (11.2.0)
 pip install pydantic
 pip install tensorflow-probability
 pip install plotly
 pip install kaleido
 pip install seaborn
-pip install jax==0.4.23 jaxlib==0.4.23
+pip install jax==0.4.23 jaxlib==0.4.23 (optax '0.1.8')
 ```
 
 ## Requirements for Sequential Design Experiments

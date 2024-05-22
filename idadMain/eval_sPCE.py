@@ -40,6 +40,7 @@ def evaluate_run(
     for t_exp in num_experiments_to_perform:
         # load model, set number of experiments
         trained_model = mlflow.pytorch.load_model(model_location, map_location=device)
+
         if t_exp:
             trained_model.T = t_exp
         else:

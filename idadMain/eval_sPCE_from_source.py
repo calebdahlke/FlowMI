@@ -54,7 +54,7 @@ def eval_from_source(
             design_net=LazyFn(
                 lambda *args: None, prototype=torch.ones(design_dim, device=device),
             ),
-            theta_loc=torch.zeros((K, p), device=device),
+            theta_loc=torch.zeros((K, p), device=device)+1,
             theta_covmat=torch.eye(p, device=device),
             noise_scale=meta["noise_scale"] * torch.ones(1, device=device),
             p=p,

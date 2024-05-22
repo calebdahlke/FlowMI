@@ -64,7 +64,7 @@ def evaluate_nontrainable_policy_locfin(
         locfin_model = HiddenObjects(
             design_net=design_net,
             T=T,
-            theta_loc=theta_prior_loc,
+            theta_loc=theta_prior_loc+1,
             theta_covmat=theta_prior_covmat,
             K=K,
             p=p,
@@ -123,5 +123,5 @@ if __name__ == "__main__":
         policy=args.policy,
         p=args.physical_dim,
         device=args.device,
-        n_rollout=160
+        n_rollout=128
     )

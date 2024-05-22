@@ -10,11 +10,12 @@ import pyro
 import pyro.distributions as dist
 from tqdm import trange
 import mlflow
-
+from collections import OrderedDict
 from neural.modules import Mlp
 from neural.critics import CriticBA
-from neural.baselines import BatchDesignBaseline
+from neural.baselines import BatchDesignBaseline, DesignBaseline
 from neural.aggregators import ConcatImplicitDAD
+import time
 
 from experiment_tools.pyro_tools import auto_seed
 from oed.design import OED
@@ -197,6 +198,7 @@ class FlowEstimator(BlackBoxMutualInformation):
         
         latents_fX_post, logDetJfX_post = self.fX_post.forward(latents)
         log_probs_q = self.critic(latents_fX_post.reshape((len(latents),K,p)), *history)
+        # log_probs_q = self.critic(latents_fX_post.reshape((len(latents),K,p)), history[0][1])
         self.hX_post = -log_probs_q.mean()-logDetJfX_post.mean()
         
         latents_fX_prior, logDetJfX_prior = self.fX_prior.forward(latents)
@@ -218,6 +220,142 @@ class FlowEstimator(BlackBoxMutualInformation):
         """
         loss_to_constant = torch_item(self.differentiable_loss(*args, **kwargs))
         return loss_to_constant
+    
+class CriticNew(nn.Module):
+    """Barber Agakov variational critic
+    fc_layers : nn.Sequential instance, should return output of size 1
+        if not specified, default is to do linear -> Relu -> output
+    returns:
+    scores_joint: tensor of shape [batch_size, 1 + num_negative_samples]
+        The first column contains the positive examples scores; the rest are 0.
+    scores_prod: tensor of shape [batch_size, 1 + num_negative_samples];
+        The first column is 0s; the rest contain the negative examples scores.
+    """
+
+    def __init__(
+        self,
+        latent_dim,
+        history_encoder_network,
+        # latent_encoder_network,
+        head_layer_mean=None,
+        head_layer_sd=None,
+    ):
+        super().__init__()
+        self.critic_type = "joint"
+        self.history_encoder_network = history_encoder_network
+        # self.latent_encoder_network = latent_encoder_network
+
+        ## [!] relying on encoder networkrs having .encoding_dim attributes ##
+        input_dim = history_encoder_network.encoding_dim
+        ## [!] relying on latent encoder networkr having .input_dim_flat attribute ##
+        # this is the dimension of the latent
+        # this is to set the output dimension equal to the dim of the latent.
+        def _reshape_input(x):
+            return x.flatten(-2)
+
+        def _id(x):
+            return x
+
+        if isinstance(latent_dim, int):
+            latent_dim_flat = latent_dim
+            self._prepare_input = _id
+        else:
+            latent_dim_flat = latent_dim[0] * latent_dim[1]
+            self._prepare_input = _reshape_input
+
+        if head_layer_mean is not None:
+            self.head_layer_mean = head_layer_mean
+        else:
+            # self.head_layer_mean = nn.Sequential(
+            #     OrderedDict(
+            #         [
+            #             ("critic_ba_l1_mean", nn.Linear(input_dim, 512)),
+            #             ("critic_ba_relu1_mean", nn.ReLU()),
+            #             ("critic_ba_output_mean", nn.Linear(512, latent_dim_flat)),
+            #         ]
+            #     )
+            # )
+            self.head_layer_mean = nn.Sequential(
+                OrderedDict(
+                    [
+                        ("critic_ba_l1_mean", nn.Linear(input_dim, 16)),
+                        ("critic_ba_relu1_mean", nn.ReLU()),
+                        ("critic_ba_l2_mean", nn.Linear(16, 8)),
+                        ("critic_ba_relu2_mean", nn.ReLU()),
+                        ("critic_ba_output_mean", nn.Linear(8, latent_dim_flat)),
+                    ]
+                )
+            )
+        if head_layer_sd is not None:
+            self.head_layer_sd = head_layer_sd
+        else:
+            # self.head_layer_sd = nn.Sequential(
+            #     OrderedDict(
+            #         [
+            #             ("critic_ba_l1_sd", nn.Linear(input_dim, 512)),
+            #             ("critic_ba_relu1_sd", nn.ReLU()),
+            #             ("critic_ba_output_sd", nn.Linear(512, latent_dim_flat)),
+            #             ("critic_ba_softplus", nn.Softplus()),
+            #         ]
+            #     )
+            # )
+            self.head_layer_sd = nn.Sequential(
+                OrderedDict(
+                    [
+                        ("critic_ba_l1_sd", nn.Linear(input_dim, 16)),
+                        ("critic_ba_relu1_sd", nn.ReLU()),
+                        ("critic_ba_l2_sd", nn.Linear(16, 8)),
+                        ("critic_ba_relu2_sd", nn.ReLU()),
+                        ("critic_ba_output_sd", nn.Linear(8, latent_dim_flat)),
+                        ("critic_ba_softplus", nn.Softplus()),
+                    ]
+                )
+            )
+
+    def get_variational_params(self, obs):#*design_obs_pairs):#
+        # history_encoding = self.history_encoder_network(*design_obs_pairs)
+        mean = self.head_layer_mean(obs)#self.head_layer_mean(history_encoding)#
+        sd = 1e-5 + self.head_layer_sd(obs)#1e-5 + self.head_layer_sd(history_encoding)#
+        return mean, sd
+
+    def forward(self, latent, obs):
+        latent_flat = self._prepare_input(latent)
+        mean, sd = self.get_variational_params(obs)
+        log_probs_q = (
+            torch.distributions.Normal(loc=mean, scale=sd)
+            .log_prob(latent_flat)
+            .sum(axis=-1)
+        )
+
+        return log_probs_q
+
+class BatchDesignBaselineMean(DesignBaseline):
+    """
+    Batch design baseline: learns T constants.
+
+    - If trained with InfoNCE bound, this is the SG-BOED static baseline.
+    - If trained with the NWJ bound, this is the MINEBED static baselines.
+    """
+
+    def __init__(
+        self,
+        T,
+        design_dim,
+        output_activation=nn.Identity(),
+        design_init=torch.distributions.Normal(0, 0.5),#torch.zeros((1,1)),
+    ):
+        super().__init__(design_dim)
+        self.designs = nn.ParameterList(
+            [
+                nn.Parameter(design_init.sample())
+                for i in range(T)
+            ]
+        )
+        self.output_activation = output_activation
+
+    def forward(self, *design_obs_pairs):
+        j = len(design_obs_pairs)
+        return self.output_activation(self.designs[j])
 
 
 def optimise_design_and_critic(
@@ -226,6 +364,7 @@ def optimise_design_and_critic(
     flow_prior_theta,
     flow_post_theta,
     obs_critic,
+    design_init,
     train_flow,
     run_flow,
     experiment_number,
@@ -239,14 +378,18 @@ def optimise_design_and_critic(
     lr_flow,
     annealing_scheme=None,
 ):
-    design_init = (
-        torch.distributions.Normal(0.0, 0.01)
-        if experiment_number == 0
-        else torch.distributions.Normal(0.0, 1.0)
-    )
-    # design_init = torch.distributions.Normal(0.0, 1.0)
-    design_net = BatchDesignBaseline(
-        T=1, design_dim=(1, p), design_init=design_init
+    # design_init = (
+    #     torch.distributions.Normal(0.0, 0.01)
+    #     if experiment_number == 0
+    #     else torch.distributions.Normal(0.0, 1.0)
+    # )
+    # # design_init = torch.distributions.Normal(0.0, 1.0)
+    # design_net = BatchDesignBaseline(
+    #     T=1, design_dim=(1, p), design_init=design_init
+    # ).to(device)
+    design_init_dist = torch.distributions.MultivariateNormal(design_init,.001*torch.eye(design_init.shape[0],device=device))#0.01
+    design_net = BatchDesignBaselineMean(
+        T=1, design_dim=(1, p), design_init=design_init_dist
     ).to(device)
     new_mean = posterior_loc.reshape(num_sources, p)
     new_covmat = torch.cat(
@@ -273,9 +416,10 @@ def optimise_design_and_critic(
     latent_dim = (num_sources, p)
     observation_dim = n
     if obs_critic== None:
-        hidden_dim = 512#64#
-        encoding_dim = 8
-        hist_encoder_HD = [64, hidden_dim]
+        hidden_dim = 512#16#
+        encoding_dim = 8#observation_dim#
+        hist_encoder_HD = [64, hidden_dim]#[hidden_dim]#[16, hidden_dim]#
+        # hist_enc_critic_head_HD = [hidden_dim]
         hist_enc_critic_head_HD = [
             hidden_dim // 2,
             hidden_dim,
@@ -301,6 +445,9 @@ def optimise_design_and_critic(
         critic_net = CriticBA(
             history_encoder_network=critic_history_encoder, latent_dim=latent_dim
         ).to(device)
+        # critic_net = CriticNew(
+        #     history_encoder_network=critic_history_encoder, latent_dim=latent_dim
+        # ).to(device)
     else:
         critic_net = obs_critic
     
@@ -313,7 +460,8 @@ def optimise_design_and_critic(
             #     fX_prior = SplineFlow(dim_x,n_flows=1,hidden_dims=[32,64], count_bins=256, bounds=4,order = 'quadratic', device=device)
             #     fX_prior, flowx_loss= InitFlowToIdentity(dim_x, fX_prior, bounds=4,lr=init_lr_x,device=device)
             #     init_lr_x *= .5
-            fX_prior = SplineFlow(dim_x,n_flows=1,hidden_dims=[32,64], count_bins=256, bounds=4,order = 'quadratic', device=device)
+            # fX_prior = SplineFlow(dim_x,n_flows=1,hidden_dims=[32,64], count_bins=256, bounds=4,order = 'quadratic', device=device)
+            fX_prior = SplineFlow(dim_x,n_flows=1,hidden_dims=[8,8], count_bins=128, bounds=5,order = 'linear', device=device)
         else:
             # fX_prior = copy.deepcopy(flow_prior_theta)
             fX_prior = copy.deepcopy(flow_post_theta)
@@ -324,7 +472,8 @@ def optimise_design_and_critic(
             #     fX_post = SplineFlow(dim_x,n_flows=1,hidden_dims=[32,64], count_bins=256, bounds=4,order = 'quadratic', device=device)
             #     fX_post, flowx_loss= InitFlowToIdentity(dim_x, fX_post, bounds=4,lr=init_lr_x,device=device)
             #     init_lr_x *= .5
-            fX_post = SplineFlow(dim_x,n_flows=1,hidden_dims=[32,64], count_bins=256, bounds=4,order = 'quadratic', device=device)
+            # fX_post = SplineFlow(dim_x,n_flows=1,hidden_dims=[32,64], count_bins=256, bounds=4,order = 'quadratic', device=device)
+            fX_post = SplineFlow(dim_x,n_flows=1,hidden_dims=[8,8], count_bins=128, bounds=5,order = 'linear', device=device)
         else:
             fX_post = copy.deepcopy(flow_post_theta)
     else:
@@ -344,31 +493,50 @@ def optimise_design_and_critic(
     )
 
     ### Set-up optimiser ###
-    optimizer_design = torch.optim.Adam(list(ho_model.design_net.parameters())+list(critic_net.parameters()))
+    optimizer_design = torch.optim.Adam(list(critic_net.parameters()))#list(ho_model.design_net.parameters())+
     annealing_freq, factor = annealing_scheme
-    scheduler_design = pyro.optim.ExponentialLR(
-        {
-            "optimizer": optimizer_design,
-            "optim_args": {"lr": lr_design},
-            "gamma" : factor,
-            "verbose": False,
-        }
-    )
+    # scheduler_design = pyro.optim.ExponentialLR(
+    #     {
+    #         "optimizer": optimizer_design,
+    #         "optim_args": {"lr": lr_design},
+    #         "gamma" : factor,
+    #         "verbose": False,
+    #     }
+    # )
+    scheduler_design = pyro.optim.ReduceLROnPlateau(
+            {
+                "optimizer": optimizer_design,
+                "optim_args": {"lr": lr_design},
+                "factor": .95,
+                "patience": 2,
+                "verbose": False,
+            }
+        )
     
     if run_flow and train_flow:
         optimizer_flow = torch.optim.Adam(list(mi_loss_instance.fX_prior.parameters())+list(mi_loss_instance.fX_post.parameters()))#+list(critic_net.parameters()))
         annealing_freq, factor = annealing_scheme
-        scheduler_flow = pyro.optim.ExponentialLR(
+        # scheduler_flow = pyro.optim.ExponentialLR(
+        #     {
+        #         "optimizer": optimizer_flow,
+        #         "optim_args": {"lr": lr_flow},
+        #         "gamma" : factor,
+        #         "verbose": False,
+        #     }
+        # )
+        scheduler_flow = pyro.optim.ReduceLROnPlateau(
             {
                 "optimizer": optimizer_flow,
                 "optim_args": {"lr": lr_flow},
-                "gamma" : factor,
+                "factor": .99,
+                "patience": 2,
                 "verbose": False,
             }
         )
     
     ## Optimise ###
     design_prev = 1*design_net.designs[0]
+    min_loss = torch.inf
     j=0
     loss_history = []
     num_steps_range = trange(0, num_steps + 0, desc="Loss: 0.000 ")
@@ -386,34 +554,47 @@ def optimise_design_and_critic(
         
         
         if i % 100 == 0:
-            num_steps_range.set_description("Loss: {:.3f} ".format(torch_item(negMI)))
+            num_steps_range.set_description("Loss: {:.3f} ".format(torch_item(mi_loss_instance.hX_prior+negMI)))
             loss_eval = mi_loss_instance.loss()#*args, **kwargs)
-            loss_history.append(loss_eval)
+            loss_history.append(mi_loss_instance.hX_prior+negMI)
 
-        if i % annealing_freq == 0 and not i == 0:
-            scheduler_design.step()
+        # if i % annealing_freq == 0 and not i == 0:
+        #     scheduler_design.step()
+        #     if run_flow and train_flow:
+        #         scheduler_flow.step()
+        #     # scheduler.step(loss_eval)
+        # if i % 500 ==0 and not i == 0:
+        #     with torch.no_grad():
+        #         design_current = design_net.designs[0]
+        #         design_diff = torch.max((design_current-design_prev).pow(2).sum(axis=1).pow(.5))
+        #         # print(design_current)
+        #         if design_diff < 1e-2:
+        #             j+=1
+        #             if j>=2:
+        #                 break
+        #         else:
+        #             design_prev = 1*design_current
+        #             j=0
+        if i % 250 ==0 and not i == 0:
+            # with torch.no_grad():
+            #     if min_loss < mi_loss_instance.hX_prior+negMI:
+            #         j+=1
+            #         if j>=4:
+            #             break
+            #     else:
+            #         min_loss = 1*mi_loss_instance.hX_prior+negMI
+            #         j=0
+            scheduler_design.step(mi_loss_instance.hX_prior+negMI)
             if run_flow and train_flow:
-                scheduler_flow.step()
+                scheduler_flow.step(mi_loss_instance.hX_prior+negMI)
             # scheduler.step(loss_eval)
-        if i % 500 ==0 and not i == 0:
-            with torch.no_grad():
-                design_current = design_net.designs[0]
-                design_diff = torch.max((design_current-design_prev).pow(2).sum(axis=1).pow(.5))
-                # print(design_current)
-                if design_diff < 1e-2:
-                    j+=1
-                    if j>=2:
-                        break
-                else:
-                    design_prev = 1*design_current
-                    j=0
 
-    return ho_model, mi_loss_instance
+    return ho_model, mi_loss_instance, loss_history
 
 
 def main_loop(
     run,  # number of rollouts
-    mlflow_run_id,
+    path_to_extra_data,
     device,
     T,
     train_flow_every_step,
@@ -437,7 +618,7 @@ def main_loop(
     prior = torch.distributions.MultivariateNormal(theta_loc, theta_covmat)
 
     # sample true param
-    true_theta = prior.sample(torch.Size([1]))#torch.tensor([[[-0.6240, -1.1926], [-0.3522, -0.7592]]], device=device)#torch.tensor([[[-0.3281,  0.2271], [-0.0320,  0.9442]]], device=device)#
+    true_theta = torch.tensor([[[-1.3, 1.45], [-1.1, -1.5]]], device=device)#torch.tensor([[[.8, -.6], [-.8, -.7]]], device=device)#prior.sample(torch.Size([1]))#torch.tensor([[[-0.3281,  0.2271], [-0.0320,  0.9442]]], device=device)#
 
     designs_so_far = []
     observations_so_far = []
@@ -445,16 +626,19 @@ def main_loop(
     # Set posterior equal to the prior
     posterior_loc = theta_loc.reshape(-1)  # check if needs to be reshaped.
     posterior_scale = torch.ones(p * num_sources, device=device)
-
+    design_init = torch.zeros(p,device=device)
+    design_init[0]=-1
     for t in range(0, T):
+        t_start = time.time()
         print(f"Step {t + 1}/{T} of Run {run + 1}")
         pyro.clear_param_store()
-        ho_model, mi_loss_instance = optimise_design_and_critic(
+        ho_model, mi_loss_instance, loss_history = optimise_design_and_critic(
             posterior_loc,
             posterior_scale,
             flow_prior_theta,
             flow_post_theta,
             critic_net,
+            design_init,
             train_flow,
             run_flow,
             experiment_number=t,
@@ -478,7 +662,7 @@ def main_loop(
         design, observation = ho_model.forward(theta=trans_true_theta)
         
         posterior_loc, posterior_scale = mi_loss_instance.critic.get_variational_params(
-            *zip(design, observation)
+            *zip(design, observation)#observation[0]#
         )
         
         posterior_loc, posterior_scale = (
@@ -488,64 +672,68 @@ def main_loop(
         
         ## Fixes deepcopy issue?
         with torch.no_grad():
-            mu_prior_trans,_ = mi_loss_instance.fX_prior(mi_loss_instance.mu_prior)
-            mu_post_trans,_ = mi_loss_instance.fX_post(posterior_loc)
+            mu_prior_trans = mi_loss_instance.fX_prior.reverse(posterior_loc)
+            mu_post_trans = mi_loss_instance.fX_post.reverse(posterior_loc)
+            design_init = torch.mean(mu_post_trans.reshape(p,num_sources),axis=0)
             
         flow_prior_theta = mi_loss_instance.fX_prior
         flow_post_theta = mi_loss_instance.fX_post
         critic_net = mi_loss_instance.critic
+        
+        t_end = time.time()
+        run_time = t_end-t_start
             
         designs_so_far.append(design[0])
         observations_so_far.append(observation[0])
         
-        print(designs_so_far)
-        print(observations_so_far)
-        print(f"Fitted posterior: mean = {posterior_loc}, sd = {posterior_scale}")
-        print("True theta = ", true_theta.reshape(-1))
+        # print(designs_so_far)
+        # print(observations_so_far)
+        # print(f"Fitted posterior: mean = {mu_post_trans}, sd = {posterior_scale}")
+        # print("True theta = ", true_theta.reshape(-1))
         
-        #### Plot From True Theta
-        with torch.no_grad():
-            import numpy as np
-            import scipy
-            import matplotlib.pyplot as plt
-            x = np.linspace(-2.5,2.5,100)
-            y = np.linspace(-2.5,2.5,100)
-            X, Y = np.meshgrid(x, y)
-            fig, axs = plt.subplots(2, 2)
-            ######### Prior on source 1 ###########################################################
-            fX, logJac = mi_loss_instance.fX_prior.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),true_theta[0][1][0].cpu().numpy()*np.ones(np.shape(X.flatten())),true_theta[0][1][1].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
-            points = fX.reshape((100,100,4))
-            Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mi_loss_instance.mu_prior.cpu().numpy(), mi_loss_instance.Sigma_prior.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
-            axs[0, 0].pcolor(X, Y, Z)
-            axs[0, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
-            axs[0, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
-            ######### Prior on source 2 ###########################################################
-            fX, logJac = mi_loss_instance.fX_prior.forward(torch.from_numpy((np.vstack((true_theta[0][0][0].cpu().numpy()*np.ones(np.shape(X.flatten())),true_theta[0][0][1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
-            points = fX.reshape((100,100,4))
-            Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mi_loss_instance.mu_prior.cpu().numpy(), mi_loss_instance.Sigma_prior.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
-            axs[0, 1].pcolor(X, Y, Z)
-            axs[0, 1].scatter(true_theta[0][1][0].cpu().numpy(),true_theta[0][1][1].cpu().numpy(), color='red', marker='x',label = 'True')
-            axs[0, 1].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+        # #### Plot From True Theta
+        # with torch.no_grad():
+        #     import numpy as np
+        #     import scipy
+        #     import matplotlib.pyplot as plt
+        #     x = np.linspace(-2.5,2.5,100)
+        #     y = np.linspace(-2.5,2.5,100)
+        #     X, Y = np.meshgrid(x, y)
+        #     fig, axs = plt.subplots(2, 2)
+        #     ######### Prior on source 1 ###########################################################
+        #     fX, logJac = mi_loss_instance.fX_prior.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),true_theta[0][1][0].cpu().numpy()*np.ones(np.shape(X.flatten())),true_theta[0][1][1].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
+        #     points = fX.reshape((100,100,4))
+        #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mi_loss_instance.mu_prior.cpu().numpy(), mi_loss_instance.Sigma_prior.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+        #     axs[0, 0].pcolor(X, Y, Z)
+        #     axs[0, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
+        #     axs[0, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+        #     ######### Prior on source 2 ###########################################################
+        #     fX, logJac = mi_loss_instance.fX_prior.forward(torch.from_numpy((np.vstack((true_theta[0][0][0].cpu().numpy()*np.ones(np.shape(X.flatten())),true_theta[0][0][1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
+        #     points = fX.reshape((100,100,4))
+        #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mi_loss_instance.mu_prior.cpu().numpy(), mi_loss_instance.Sigma_prior.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+        #     axs[0, 1].pcolor(X, Y, Z)
+        #     axs[0, 1].scatter(true_theta[0][1][0].cpu().numpy(),true_theta[0][1][1].cpu().numpy(), color='red', marker='x',label = 'True')
+        #     axs[0, 1].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
             
-            ######### Posterior on source 1 ###########################################################
-            fX, logJac = flow_post_theta.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),true_theta[0][1][0].cpu().numpy()*np.ones(np.shape(X.flatten())),true_theta[0][1][1].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
-            points = fX.reshape((100,100,4))
-            Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc[0].cpu().numpy(), torch.diag(posterior_scale[0]).cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
-            axs[1, 0].pcolor(X, Y, Z)
-            axs[1, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
-            axs[1, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
-            ######### Posterior on source 2 ###########################################################
-            fX, logJac = flow_post_theta.forward(torch.from_numpy((np.vstack((true_theta[0][0][0].cpu().numpy()*np.ones(np.shape(X.flatten())),true_theta[0][0][1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
-            points = fX.reshape((100,100,4))
-            Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc[0].cpu().numpy(), torch.diag(posterior_scale[0]).cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
-            axs[1, 1].pcolor(X, Y, Z)
-            axs[1, 1].scatter(true_theta[0][1][0].cpu().numpy(),true_theta[0][1][1].cpu().numpy(), color='red', marker='x',label = 'True')
-            axs[1, 1].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
-            axs[0, 0].title.set_text('Source 1')
-            axs[0, 1].title.set_text('Source 2')
-            axs[0, 0].set(ylabel='Prior')
-            axs[1, 0].set(ylabel='Posterior')
-            plt.show()
+        #     ######### Posterior on source 1 ###########################################################
+        #     fX, logJac = flow_post_theta.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),true_theta[0][1][0].cpu().numpy()*np.ones(np.shape(X.flatten())),true_theta[0][1][1].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
+        #     points = fX.reshape((100,100,4))
+        #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc[0].cpu().numpy(), torch.diag(posterior_scale[0]).cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+        #     axs[1, 0].pcolor(X, Y, Z)
+        #     axs[1, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
+        #     axs[1, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+        #     ######### Posterior on source 2 ###########################################################
+        #     fX, logJac = flow_post_theta.forward(torch.from_numpy((np.vstack((true_theta[0][0][0].cpu().numpy()*np.ones(np.shape(X.flatten())),true_theta[0][0][1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
+        #     points = fX.reshape((100,100,4))
+        #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc[0].cpu().numpy(), torch.diag(posterior_scale[0]).cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+        #     axs[1, 1].pcolor(X, Y, Z)
+        #     axs[1, 1].scatter(true_theta[0][1][0].cpu().numpy(),true_theta[0][1][1].cpu().numpy(), color='red', marker='x',label = 'True')
+        #     axs[1, 1].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+        #     axs[0, 0].title.set_text('Source 1')
+        #     axs[0, 1].title.set_text('Source 2')
+        #     axs[0, 0].set(ylabel='Prior')
+        #     axs[1, 0].set(ylabel='Posterior')
+        #     plt.show()
             
         # #### Plot From Mean Value
         # with torch.no_grad():
@@ -591,53 +779,110 @@ def main_loop(
         #     axs[1, 0].set(ylabel='Posterior')
         #     plt.show()
             
-        # #### Plot From Trans Mean Value    
-        # with torch.no_grad():
-        #     import numpy as np
-        #     import scipy
-        #     import matplotlib.pyplot as plt
-        #     x = np.linspace(-2.5,2.5,100)
-        #     y = np.linspace(-2.5,2.5,100)
-        #     X, Y = np.meshgrid(x, y)
-        #     fig, axs = plt.subplots(2, 2)
-        #     ######### Prior on source 1 ###########################################################
-        #     fX, logJac = mi_loss_instance.fX_prior.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),mu_prior_trans[2].cpu().numpy()*np.ones(np.shape(X.flatten())),mu_prior_trans[3].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
-        #     points = fX.reshape((100,100,4))
-        #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mi_loss_instance.mu_prior.cpu().numpy(), mi_loss_instance.Sigma_prior.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
-        #     axs[0, 0].pcolor(X, Y, Z)
-        #     axs[0, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
-        #     axs[0, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
-        #     ######### Prior on source 2 ###########################################################
-        #     fX, logJac = mi_loss_instance.fX_prior.forward(torch.from_numpy((np.vstack((mu_prior_trans[0].cpu().numpy()*np.ones(np.shape(X.flatten())),mu_prior_trans[1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
-        #     points = fX.reshape((100,100,4))
-        #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mi_loss_instance.mu_prior.cpu().numpy(), mi_loss_instance.Sigma_prior.cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
-        #     axs[0, 1].pcolor(X, Y, Z)
-        #     axs[0, 1].scatter(true_theta[0][1][0].cpu().numpy(),true_theta[0][1][1].cpu().numpy(), color='red', marker='x',label = 'True')
-        #     axs[0, 1].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+        #### Plot From Trans Mean Value    
+        with torch.no_grad():
+            import numpy as np
+            import scipy
+            import matplotlib.pyplot as plt
+            x = np.linspace(-3,3,100)
+            y = np.linspace(-3,3,100)
+            X, Y = np.meshgrid(x, y)
+            fig, axs = plt.subplots(2, 2)
+            ######### Prior on source 1 ###########################################################
+            fX, logJac = mi_loss_instance.fX_prior.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),mu_prior_trans[0][2].detach().cpu().numpy()*np.ones(np.shape(X.flatten())),mu_prior_trans[0][3].detach().cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
+            points = fX.reshape((100,100,4))
+            Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mi_loss_instance.mu_prior.detach().cpu().numpy(), mi_loss_instance.Sigma_prior.detach().cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+            axs[0, 0].pcolor(X, Y, Z)
+            axs[0, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
+            axs[0, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+            ######### Prior on source 2 ###########################################################
+            fX, logJac = mi_loss_instance.fX_prior.forward(torch.from_numpy((np.vstack((mu_prior_trans[0][0].detach().cpu().numpy()*np.ones(np.shape(X.flatten())),mu_prior_trans[0][1].detach().cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
+            points = fX.reshape((100,100,4))
+            Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), mi_loss_instance.mu_prior.detach().cpu().numpy(), mi_loss_instance.Sigma_prior.detach().cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+            axs[0, 1].pcolor(X, Y, Z)
+            axs[0, 1].scatter(true_theta[0][1][0].cpu().numpy(),true_theta[0][1][1].cpu().numpy(), color='red', marker='x',label = 'True')
+            axs[0, 1].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
             
-        #     ######### Posterior on source 1 ###########################################################
-        #     fX, logJac = flow_post_theta.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),mu_post_trans[0,2].cpu().numpy()*np.ones(np.shape(X.flatten())),mu_post_trans[0,3].cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
-        #     points = fX.reshape((100,100,4))
-        #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc[0].cpu().numpy(), torch.diag(posterior_scale[0]).cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
-        #     axs[1, 0].pcolor(X, Y, Z)
-        #     axs[1, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
-        #     axs[1, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
-        #     ######### Posterior on source 2 ###########################################################
-        #     fX, logJac = flow_post_theta.forward(torch.from_numpy((np.vstack((mu_post_trans[0,0].cpu().numpy()*np.ones(np.shape(X.flatten())),mu_post_trans[0,1].cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
-        #     points = fX.reshape((100,100,4))
-        #     Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc[0].cpu().numpy(), torch.diag(posterior_scale[0]).cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
-        #     axs[1, 1].pcolor(X, Y, Z)
-        #     axs[1, 1].scatter(true_theta[0][1][0].cpu().numpy(),true_theta[0][1][1].cpu().numpy(), color='red', marker='x',label = 'True')
-        #     axs[1, 1].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
-        #     axs[0, 0].title.set_text('Source 1')
-        #     axs[0, 1].title.set_text('Source 2')
-        #     axs[0, 0].set(ylabel='Prior')
-        #     axs[1, 0].set(ylabel='Posterior')
-        #     plt.show()
+            ######### Posterior on source 1 ###########################################################
+            fX, logJac = mi_loss_instance.fX_post.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),mu_post_trans[0][2].detach().cpu().numpy()*np.ones(np.shape(X.flatten())),mu_post_trans[0][3].detach().cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
+            points = fX.reshape((100,100,4))
+            Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc[0].detach().cpu().numpy(), torch.diag(posterior_scale[0]).detach().cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+            axs[1, 0].pcolor(X, Y, Z)
+            axs[1, 0].scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', marker='x',label = 'True')
+            axs[1, 0].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+            ######### Posterior on source 2 ###########################################################
+            fX, logJac = mi_loss_instance.fX_post.forward(torch.from_numpy((np.vstack((mu_post_trans[0,0].detach().cpu().numpy()*np.ones(np.shape(X.flatten())),mu_post_trans[0,1].detach().cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
+            points = fX.reshape((100,100,4))
+            Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc[0].detach().cpu().numpy(), torch.diag(posterior_scale[0]).detach().cpu().numpy())*np.exp(logJac.reshape((100,100)).detach().cpu().numpy())
+            axs[1, 1].pcolor(X, Y, Z)
+            axs[1, 1].scatter(true_theta[0][1][0].cpu().numpy(),true_theta[0][1][1].cpu().numpy(), color='red', marker='x',label = 'True')
+            axs[1, 1].scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='green', marker='x',label = 'Design')
+            axs[0, 0].title.set_text('Source 1')
+            axs[0, 1].title.set_text('Source 2')
+            axs[0, 0].set(ylabel='Prior')
+            axs[1, 0].set(ylabel='Posterior')
+            plt.show()
+            
+            with torch.no_grad():
+                import numpy as np
+                import scipy
+                import matplotlib.pyplot as plt
+                x = np.linspace(-3.5,3.5,300)
+                y = np.linspace(-3.5,3.5,300)
+                X, Y = np.meshgrid(x, y)   
+                plt.rcParams.update({'font.size': 40})        
+                plt.figure(figsize=(10, 10))
+                # fX, logJac = mi_loss_instance.fX_post.forward(torch.from_numpy((np.vstack((X.flatten(),Y.flatten(),mu_post_trans[0][2].detach().cpu().numpy()*np.ones(np.shape(X.flatten())),mu_post_trans[0][3].detach().cpu().numpy()*np.ones(np.shape(X.flatten())))).T)).float().to(device=device))
+                fX, logJac = mi_loss_instance.fX_post.forward(torch.from_numpy((np.vstack((mu_post_trans[0,0].detach().cpu().numpy()*np.ones(np.shape(X.flatten())),mu_post_trans[0,1].detach().cpu().numpy()*np.ones(np.shape(X.flatten())),X.flatten(),Y.flatten())).T)).float().to(device=device))
+                points = fX.reshape((300,300,4))
+                Z = scipy.stats.multivariate_normal.pdf(points.detach().cpu().numpy(), posterior_loc[0].detach().cpu().numpy(), torch.diag(posterior_scale[0]).detach().cpu().numpy())*np.exp(logJac.reshape((300,300)).detach().cpu().numpy())
+                plt.pcolor(X, Y, Z)
+                pcol = plt.pcolormesh(X,Y,Z,linewidth=0,)
+                pcol.set_edgecolor('face')
+                # levels = np.linspace(0,1,50)
+                # cnt=plt.contourf(X, Y, Z, levels=levels, cmap='viridis')#
+                # for c in cnt.collections:
+                #     c.set_edgecolor("face")
+                plt.scatter(true_theta[0][1][0].cpu().numpy(),true_theta[0][1][1].cpu().numpy(), color='red', s=200,label = 'Sources')
+                plt.scatter(true_theta[0][0][0].cpu().numpy(),true_theta[0][0][1].cpu().numpy(), color='red', s=200)
+                plt.scatter(design[0][0][0].detach().clone().cpu()[0],design[0][0][0].detach().clone().cpu()[1], color='black', s=200,label = 'Design')
+                plt.title('NVF')
+                # plt.xlabel('X')
+                # plt.ylabel('Y')
+                # plt.legend(loc="lower right")
+                # plt.colorbar()
+                plt.tight_layout()
+                plt.show()
+                plt.savefig('LocFinPostNVFNew.pdf')
         
+        # extra_data = {}
+        # extra_data["mu"] = mi_loss_instance.mu_prior.detach().clone().cpu().numpy()
+        # extra_data["sigmas"] = mi_loss_instance.Sigma_prior.detach().clone().cpu().numpy()
+        # extra_data["flow_theta"] = copy.deepcopy(mi_loss_instance.fX_prior).cpu()
+        # extra_data["flow_obs"] = copy.deepcopy(mi_loss_instance.fX_post).cpu()
+        # extra_data["critic_params"] = copy.deepcopy(mi_loss_instance.critic.get_variational_params)
+        # extra_data["posterior_loc"] = posterior_loc.cpu().numpy()
+        # extra_data["posterior_cov"] = posterior_scale.cpu().numpy()
+        # extra_data["total_time"] = run_time
+        # extra_data["design"] = design[0].detach().clone().cpu()
+        # extra_data["observations"] = observation[0].cpu()
+        
+        # path_to_run = path_to_extra_data + '/Run{}'.format(run)
+        # path_to_step = path_to_run + '/Step{}.pickle'.format(t)
+        # path_to_loss = path_to_run +'/Loss{}.pickle'.format(t)
+        # if not os.path.exists(path_to_run):
+        #     os.makedirs(path_to_run)
+        # with open(path_to_step, "wb") as f:
+        #     pickle.dump(extra_data, f)
+        # with open(path_to_loss, "wb") as f:
+        #     pickle.dump(loss_history, f)
+        # del extra_data
         
         if not train_flow_every_step:
             train_flow = False
+            
+    print(f"Fitted posterior: mean = {mu_post_trans}, sd = {posterior_scale}")
+    print("True theta = ", true_theta.reshape(-1))
 
     data_dict = {}
     for i, xi in enumerate(designs_so_far):
@@ -691,6 +936,14 @@ def main(
         "noise_scale": noise_scale,
         "num_histories": num_histories,
     }
+    
+    t = time.localtime()
+    extra_data_id = time.strftime("%Y%m%d%H%M%S", t)
+    path_to_extra_data = "./experiment_outputs/loc_fin/{}".format(extra_data_id)
+    # if not os.path.exists(path_to_extra_data):
+    #     os.makedirs(path_to_extra_data)
+    print(path_to_extra_data)
+    
     results_vi = {"loop": [], "seed": seed, "meta": meta}
     # for i in range(num_histories):
     #     results = main_loop(
@@ -712,7 +965,7 @@ def main(
     #     results_vi["loop"].append(results)
     
     results = Parallel(n_jobs=num_parallel)(delayed(main_loop)(run=i,
-                            mlflow_run_id=mlflow.active_run().info.run_id,
+                            path_to_extra_data=path_to_extra_data,
                             device=device,
                             T=T,
                             train_flow_every_step=train_flow_every_step,
@@ -743,6 +996,19 @@ def main(
     with open("./"+path_to_artifact, "wb") as f:
         pickle.dump(results_vi, f)
     print("Path to artifact - use this when evaluating:\n", path_to_artifact)
+    
+    # extra_meta = {
+    #     "train_flow_every_step": train_flow_every_step,
+    #     "run_flow": run_flow,
+    #     "ml_experiment_id":ml_info.experiment_id,
+    #     "ml_run_id":ml_info.run_id
+    # }
+    # path_to_extra_meta =path_to_extra_data + '/extra_meta.pickle'
+    # with open(path_to_extra_meta, "wb") as f:
+    #     pickle.dump(extra_meta, f)
+    # print(path_to_extra_data)
+    # print("Done.")
+    # print("Evaluating Results")
     
     eval_from_source(
         path_to_artifact=path_to_artifact,

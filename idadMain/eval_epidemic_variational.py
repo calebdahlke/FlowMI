@@ -17,7 +17,7 @@ device = "cpu"
 # SIMDATA = torch.load("data/sir_sde_data_test.pt", map_location=device)
 
 path_to_artifact = (
-    "mlruns/58/d897220fdeb447dc91bb4fd04af864ad/artifacts/results_sir_vi.pickle"
+    "mlruns/324424229926733096/1ab561bfb1714a7c8f7c9a68af84408b/artifacts/results_sir_mm_vi.pickle"#"mlruns/58/d897220fdeb447dc91bb4fd04af864ad/artifacts/results_sir_vi.pickle"#
 )
 paths_to_artifact = [
     "mlruns/58/b621c97e29674d4b86b2ec03a8581145/artifacts/results_sir_vi.pickle",

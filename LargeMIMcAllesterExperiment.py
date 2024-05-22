@@ -22,10 +22,13 @@ def evaluate_parallel(i,
     Method_Names,
     ):
     results = {}
-    np.random.seed(seed+i)
-    sample = np.random.multivariate_normal(np.zeros(2*dim),sigma, num_samples)
-    X = sample[:,:dim]
-    Y = sample[:,dim:]
+    # np.random.seed(seed+i)
+    # sample = np.random.multivariate_normal(np.zeros(2*dim),sigma, num_samples)
+    # X = sample[:,:dim]
+    # Y = sample[:,dim:]
+    task = bmi.benchmark.BENCHMARK_TASKS['multinormal-dense-25-25-0.5']
+    X, Y = task.sample(num_samples, seed=seed+i)
+    dim = task.dim_x
     
     # if 'FlowP' in Method_Names:
     #     # FlowP = FlowPostEstimator(batch_size = batch_size, max_n_steps=num_steps, learning_rate=lr,test_every_n_steps=test_every_n_steps,train_test_split=train_test_split)#max_n_steps=int(100*(i+1))
@@ -149,18 +152,18 @@ if __name__ == "__main__":
     parser.add_argument("--dim", default=15, type=int)#32
     parser.add_argument("--rho", default=.95, type=int)
     
-    parser.add_argument("--num-runs", default=10, type=int)
+    parser.add_argument("--num-runs", default=1, type=int)#10
     
-    parser.add_argument("--num-samples", default=75000, type=int)
-    parser.add_argument("--train_test_split", default=.8, type=float)
+    parser.add_argument("--num-samples", default=75000, type=int)#
+    parser.add_argument("--train_test_split", default=.5, type=float)#.8
     parser.add_argument("--batch-size", default=256, type=int)
     parser.add_argument("--test_every_n_steps", default=50, type=int)
     
     parser.add_argument("--lr", default=0.001, type=float)
     parser.add_argument("--num-steps", default=3000, type=int)#10000
     
-    # Methods = ['FlowP','FlowMP','MINE','InfoNCE']#'FlowP','FlowMP','MINE','InfoNCE','NWJ','DV']#, 'CCA', 'KSG'
-    Methods = ['JointGauss','NeuralGauss','JointFlow','NeuralFlow', 'MINE', 'InfoNCE', 'NWJ', 'DV']
+    Methods = ['JointGauss','NeuralGauss','JointFlow','NeuralFlow','MINE']#'FlowP','FlowMP','MINE','InfoNCE','NWJ','DV']#, 'CCA', 'KSG'
+    # Methods = ['JointGauss','NeuralGauss','JointFlow','NeuralFlow', 'MINE', 'InfoNCE', 'NWJ', 'DV']
     parser.add_argument("--method_names", default=Methods, type=list)
     
 

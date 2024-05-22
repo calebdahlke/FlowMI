@@ -4,7 +4,7 @@ import argparse
 
 import math
 import pandas as pd
-
+import time
 import torch
 import torch.nn as nn
 import pyro
@@ -191,7 +191,7 @@ def single_run(
     seed = auto_seed(seed)
 
     mlflow.set_experiment(mlflow_experiment_name)
-
+    start_time = time.time()
     ### Set up model networks ###
     n = 1  # batch dim
     design_dim = (n, p)
@@ -339,7 +339,7 @@ def single_run(
     mlflow.log_param("lr", lr)
     mlflow.log_param("gamma", gamma)
     # ----------------------------------------------------------------------------------
-
+    
     ### Prior hyperparams ###
     # The prior is K independent * p-variate Normals. For example, if there's 1 source
     # (K=1) in 2D (p=2), then we have 1 bivariate Normal.
@@ -440,7 +440,9 @@ def single_run(
             df, latents = ho_model.eval(n_trace=3, theta=test_theta, verbose=False)
             df["step"] = i
             outputs_history.append(df)
-
+    end_time = time.time()
+    print("Training Time:")
+    print(end_time-start_time)
     if not os.path.exists("mlflow_outputs"):
         os.makedirs("mlflow_outputs")
 
@@ -469,7 +471,7 @@ def single_run(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="iDAD: Hidden Object Detection.")
     parser.add_argument("--seed", default=-1, type=int)
-    parser.add_argument("--num-steps", default=100000, type=int)
+    parser.add_argument("--num-steps", default=100, type=int)#100000
     parser.add_argument("--num-negative-samples", default=2047, type=int)
     parser.add_argument("--num-batch-samples", default=2048, type=int)
     parser.add_argument("--lr", default=0.0005, type=float)
